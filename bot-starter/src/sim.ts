@@ -166,6 +166,32 @@ export function greedyBot(g: Game, mult = 2, name = "greedy"): Player {
   };
 }
 
+/**
+ * Modeled on the live field (Nov 2026): second prices ~10 for 1-point letters,
+ * ~15 for 3-4 pointers, ~23 for J/X/Z. Bids around 9 + face, with noise,
+ * plays 7+ letter words as they appear and flushes at the end.
+ */
+export function fieldBot(g: Game, scale = 1, name = "field"): Player {
+  return {
+    name,
+    rack: emptyRack(),
+    balance: 100,
+    score: 0,
+    isSim: false,
+    bid(l, bagLeft) {
+      if (bagLeft === 0) return 0;
+      const v = (9 + 1.4 * FACE[l]) * scale * (0.8 + 0.6 * g.rnd());
+      return Math.min(Math.round(v), this.balance);
+    },
+    tick(bagLeft) {
+      for (;;) {
+        const w = g.longest(this.rack, bagLeft <= 1 ? 2 : 7);
+        if (w === undefined || !g.play(w, this)) break;
+      }
+    },
+  };
+}
+
 export function brainBot(g: Game, params: Params = DEFAULT_PARAMS, name = "brain"): Player {
   const brain = new Brain(g.d, params);
   return {

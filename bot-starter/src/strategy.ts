@@ -53,11 +53,11 @@ export interface Params {
 }
 
 export const DEFAULT_PARAMS: Params = {
-  alpha: 2.0,
+  alpha: 1.5,
   friend: 1.0,
-  base: 1.5,
+  base: 3,
   dupPen: 1.5,
-  vowelPen: 1.2,
+  vowelPen: 2.5,
   horizon: 14,
   flushAt: 1,
   kappa: 3.0,

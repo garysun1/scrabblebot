@@ -223,7 +223,8 @@ export function replayMatch(d: Dict, m: MatchRec, pol: Policy & { letter: number
 }
 
 export function loadMatches(): MatchRec[] {
-  return JSON.parse(readFileSync(new URL("./replay_data.json", import.meta.url), "utf8"));
+  const f = process.env.REPLAY_FILE ?? "./replay_data.json";
+  return JSON.parse(readFileSync(new URL(f, import.meta.url), "utf8"));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

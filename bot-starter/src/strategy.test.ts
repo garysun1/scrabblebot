@@ -45,3 +45,48 @@ test("decisions are fast enough for a 1s auction", () => {
   brain.words(v);
   assert.ok(performance.now() - t < 150, `took ${performance.now() - t}ms`);
 });
+
+// ---- brain v2 ----
+import { BAG_COUNTS } from "./engine.js";
+import { Brain2, type State } from "./brain2.js";
+
+const b2 = new Brain2(dict);
+const st = (letters: string, balance: number, bagLeft: number): State => ({
+  rack: rack(letters),
+  balance,
+  bagLeft,
+  totalAuctions: 68,
+  unseen: Int8Array.from(BAG_COUNTS),
+  firstPrice: false,
+  heat: 1,
+});
+
+test("v2: anchor, refined bid and lambda refresh fit inside an auction", () => {
+  const s = st("AEINRSTDOLG", 80, 40);
+  let t = performance.now();
+  b2.refreshLambda(s);
+  const tRefresh = performance.now() - t;
+  t = performance.now();
+  b2.quickBid(s, L("E"));
+  const tQuick = performance.now() - t;
+  t = performance.now();
+  const bid = b2.bid(s, L("E"));
+  const tBid = performance.now() - t;
+  assert.ok(tQuick < 5, `anchor took ${tQuick}ms`);
+  assert.ok(tBid < 300, `refined bid took ${tBid}ms`);
+  assert.ok(tRefresh < 500, `lambda refresh took ${tRefresh}ms`);
+  assert.ok(bid >= 0 && bid <= 80);
+});
+
+test("v2: all-in on the last usable auction, nothing on the last", () => {
+  const s = st("RETAIN", 37, 1);
+  s.maxRivalBalance = 20;
+  assert.equal(b2.bid(s, L("S")), 21); // capped at richest rival + 1
+  assert.equal(b2.bid(st("RETAIN", 37, 0), L("S")), 0);
+});
+
+test("v2: holds a cheap short word mid-match, flushes at the end", () => {
+  b2.refreshLambda(st("CAT", 60, 40));
+  assert.deepEqual(b2.words(st("CAT", 60, 40)), []);
+  assert.ok(b2.words(st("CAT", 60, 1)).length === 1);
+});

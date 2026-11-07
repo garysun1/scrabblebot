@@ -149,6 +149,43 @@ export class Dict {
     return out;
   }
 
+  /**
+   * Anagram classes that fit `r` with at most one missing tile. Returns
+   * parallel arrays: the class index and the missing letter (-1 if none).
+   * One scan serves "rack + any one extra letter" valuations.
+   */
+  candidatesPlusOne(r: Rack, minLen = 2): { idx: number[]; miss: number[] } {
+    const total = rackSize(r) + 1;
+    const rm = rackMask(r);
+    const idx: number[] = [];
+    const miss: number[] = [];
+    const ord = this.order;
+    const c = this.counts;
+    for (let j = 0; j < this.n; j++) {
+      const k = ord[j];
+      const L = this.len[k];
+      if (L > total || L < minLen) continue;
+      const extra = this.mask[k] & ~rm;
+      if (extra & (extra - 1)) continue; // two or more letters we lack entirely
+      const o = k * 26;
+      let m = -1;
+      let ok = true;
+      for (let i = 0; i < 26; i++) {
+        const d = c[o + i] - r[i];
+        if (d <= 0) continue;
+        if (d > 1 || m >= 0) {
+          ok = false;
+          break;
+        }
+        m = i;
+      }
+      if (!ok) continue;
+      idx.push(k);
+      miss.push(m);
+    }
+    return { idx, miss };
+  }
+
   /** Narrow an existing candidate list to those fitting `r`. */
   filter(cands: number[], r: Rack, minLen = 2): number[] {
     const out: number[] = [];

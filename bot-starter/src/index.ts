@@ -29,6 +29,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Dict, type Rack, rackFromMap, rackToString } from "./engine.js";
 import { Brain, DEFAULT_PARAMS, type View } from "./strategy.js";
+import { Brain2, DEFAULT_PARAMS2, type State, unseenPool } from "./brain2.js";
+import { emptyRack } from "./engine.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -53,9 +55,13 @@ function saveToken(tok: string) {
 // over the ENABLE list (~0.4s).
 const DICT = Dict.load();
 // Optional live tuning: BRAIN_PARAMS='{"kappa":3.5}' npm start
+// BRAIN=v1 selects the older heuristic brain (strategy.ts); default is v2.
+const BRAIN = process.env.BRAIN ?? "v2";
 const PARAMS = { ...DEFAULT_PARAMS, ...JSON.parse(process.env.BRAIN_PARAMS ?? "{}") };
+const PARAMS2 = { ...DEFAULT_PARAMS2, ...JSON.parse(process.env.BRAIN_PARAMS ?? "{}") };
 const brain = new Brain(DICT, PARAMS);
-console.log(`[${BOT_NAME}] params ${JSON.stringify(PARAMS)}`);
+const brain2 = new Brain2(DICT, PARAMS2);
+console.log(`[${BOT_NAME}] brain ${BRAIN} params ${JSON.stringify(BRAIN === "v1" ? PARAMS : PARAMS2)}`);
 console.log(`[${BOT_NAME}] dictionary: ${DICT.n} anagram classes`);
 
 let myIdentity: Identity | null = null;
@@ -113,6 +119,81 @@ function viewFor(conn: DbConnection, matchId: bigint): View | null {
   };
 }
 
+// Per-match bookkeeping for brain v2: what we've seen of the bag, the
+// price heat, and a cached lambda/letter table refreshed between auctions.
+interface MatchCtx {
+  heat: number;
+  lambdaDirty: boolean;
+  refreshing: boolean;
+  totalAuctions: number;
+}
+const ctxs = new Map<string, MatchCtx>();
+function ctxFor(conn: DbConnection, matchId: bigint): MatchCtx {
+  const key = String(matchId);
+  let c = ctxs.get(key);
+  if (!c) {
+    const m = conn.db.matchState.id.find(matchId);
+    let seats = 0;
+    for (const p of conn.db.matchParticipant.iter()) if (p.matchId === matchId) seats++;
+    const total = 98 - Math.max(1, seats) * Number(m?.startingRackSize ?? 5);
+    c = { heat: 1, lambdaDirty: true, refreshing: false, totalAuctions: total };
+    ctxs.set(key, c);
+  }
+  return c;
+}
+
+function stateFor(conn: DbConnection, matchId: bigint): State | null {
+  const v = viewFor(conn, matchId);
+  if (!v || myBotId === null) return null;
+  const c = ctxFor(conn, matchId);
+  const ourTiles = Int8Array.from(v.rack);
+  const auctioned = emptyRack();
+  const rivalPlayed = emptyRack();
+  const rivalWon = emptyRack();
+  for (const a of conn.db.auction.iter()) {
+    if (a.matchId === matchId) auctioned[a.letter.charCodeAt(0) - 65]++;
+  }
+  for (const r of conn.db.auctionResult.iter()) {
+    if (r.matchId !== matchId || r.winnerBotId == null || r.winnerBotId === myBotId) continue;
+    rivalWon[r.letter.charCodeAt(0) - 65]++;
+  }
+  for (const w of conn.db.wordPlay.iter()) {
+    if (w.matchId !== matchId) continue;
+    const target = w.botId === myBotId ? ourTiles : rivalPlayed;
+    for (const ch of w.word) target[ch.charCodeAt(0) - 65]++;
+  }
+  return {
+    rack: v.rack,
+    balance: v.balance,
+    bagLeft: v.bagLeft,
+    totalAuctions: c.totalAuctions,
+    unseen: unseenPool(ourTiles, auctioned, rivalPlayed, rivalWon),
+    firstPrice: v.firstPrice,
+    maxRivalBalance: v.maxRivalBalance,
+    heat: c.heat,
+  };
+}
+
+// Recompute lambda and the letter table for a match when idle. ~100-200ms,
+// so it runs after bids and word plays have gone out.
+function scheduleLambda(conn: DbConnection, matchId: bigint) {
+  const c = ctxFor(conn, matchId);
+  c.lambdaDirty = true;
+  if (c.refreshing) return;
+  c.refreshing = true;
+  setImmediate(() => {
+    c.refreshing = false;
+    if (!c.lambdaDirty) return;
+    c.lambdaDirty = false;
+    const s = stateFor(conn, matchId);
+    if (!s) return;
+    const t0 = performance.now();
+    brain2.refreshLambda(s);
+    if (process.env.VERBOSE)
+      console.log(`[${BOT_NAME}] m${matchId} lambda ${brain2.lambda.toFixed(3)} rackValue ${brain2.rackValue.toFixed(1)} (${(performance.now() - t0).toFixed(0)}ms)`);
+  });
+}
+
 // A reducer call fails when the module refuses it, often for an expected
 // reason: a word played just after its match ended, a bid that missed the
 // auction's window. Log it and keep playing; an uncaught failure would stop
@@ -139,28 +220,54 @@ function myRunningMatches(conn: DbConnection): bigint[] {
 }
 
 // Bid (or re-bid, if our valuation moved) on the open auction of a match.
+function submitBid(conn: DbConnection, matchId: bigint, auctionId: bigint, letter: string, amount: number, note: string) {
+  const key = String(auctionId);
+  const prev = lastBid.get(key);
+  if (prev === amount || (prev === undefined && amount <= 0)) return;
+  lastBid.set(key, amount);
+  conn.reducers
+    .submitBid({ auctionId, amount: BigInt(amount) })
+    .catch(logFailure(`bid on auction ${auctionId}`));
+  console.log(`[${BOT_NAME}] m${matchId} '${letter}' bid ${amount}${prev !== undefined ? ` (was ${prev})` : ""} ${note}`);
+}
+
 function tryBid(conn: DbConnection, matchId: bigint) {
   if (myBotId === null) return;
   const m = conn.db.matchState.id.find(matchId);
   if (!m || m.status.tag !== "Running" || m.currentAuctionId == null) return;
   const a = conn.db.auction.id.find(m.currentAuctionId);
   if (!a || a.status.tag !== "Open") return;
-  const v = viewFor(conn, matchId);
-  if (!v) return;
-  const t0 = performance.now();
   const letter = a.letter.charCodeAt(0) - 65;
-  const amount = brain.bid(v, letter);
+  const t0 = performance.now();
+  if (BRAIN === "v1") {
+    const v = viewFor(conn, matchId);
+    if (!v) return;
+    const amount = brain.bid(v, letter);
+    submitBid(conn, matchId, a.id, a.letter, amount, `bal ${v.balance} bag ${v.bagLeft} rack ${rackToString(v.rack)} (${(performance.now() - t0).toFixed(0)}ms)`);
+    return;
+  }
+  const s = stateFor(conn, matchId);
+  if (!s) return;
   const key = String(a.id);
-  const prev = lastBid.get(key);
-  if (prev === amount || (prev === undefined && amount <= 0)) return;
-  lastBid.set(key, amount);
-  conn.reducers
-    .submitBid({ auctionId: a.id, amount: BigInt(amount) })
-    .catch(logFailure(`bid on auction ${a.id}`));
-  console.log(
-    `[${BOT_NAME}] m${matchId} '${a.letter}' bid ${amount}${prev !== undefined ? ` (was ${prev})` : ""} ` +
-      `bal ${v.balance} bag ${v.bagLeft} rack ${rackToString(v.rack)} (${(performance.now() - t0).toFixed(0)}ms)`,
-  );
+  // 1. Anchor: a quick bid from the cached letter table, out within a few ms.
+  if (!lastBid.has(key)) {
+    const quick = brain2.quickBid(s, letter);
+    if (quick > 0) submitBid(conn, matchId, a.id, a.letter, quick, `anchor (${(performance.now() - t0).toFixed(0)}ms)`);
+  }
+  // 2. Refined bid with fresh samples; replaces the anchor if it differs.
+  setImmediate(() => {
+    const a2 = conn.db.auction.id.find(a.id);
+    if (!a2 || a2.status.tag !== "Open") return;
+    const s2 = stateFor(conn, matchId);
+    if (!s2) return;
+    const t1 = performance.now();
+    const amount = brain2.bid(s2, letter);
+    submitBid(
+      conn, matchId, a.id, a.letter, amount,
+      `bal ${s2.balance} bag ${s2.bagLeft} rack ${rackToString(s2.rack)} λ${brain2.lambda.toFixed(2)} heat${s2.heat.toFixed(2)} (${(performance.now() - t1).toFixed(0)}ms)`,
+    );
+    scheduleLambda(conn, matchId);
+  });
 }
 
 // Play whatever words the strategy wants now, one at a time.
@@ -172,7 +279,14 @@ function tryPlayWords(conn: DbConnection, matchId: bigint) {
   }
   const v = viewFor(conn, matchId);
   if (!v) return;
-  const words = brain.words(v).map((k) => DICT.word[k]);
+  let picked: number[];
+  if (BRAIN === "v1") picked = brain.words(v);
+  else {
+    const s = stateFor(conn, matchId);
+    if (!s) return;
+    picked = brain2.words(s);
+  }
+  const words = picked.map((k) => DICT.word[k]);
   if (words.length === 0) return;
   playing.add(key);
   // The words are disjoint, so send them all at once: in the end-game flush
@@ -254,6 +368,7 @@ function watchMatch(conn: DbConnection, matchId: bigint) {
       `SELECT * FROM auction WHERE match_id = ${matchId}`,
       `SELECT * FROM match_participant WHERE match_id = ${matchId}`,
       `SELECT * FROM auction_result WHERE match_id = ${matchId}`,
+      `SELECT * FROM word_play WHERE match_id = ${matchId}`,
     ]);
   matchSubs.set(key, h);
 }
@@ -370,8 +485,19 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
-    if (myBotId === null || r.winnerBotId !== myBotId) return;
-    console.log(`[${BOT_NAME}] m${r.matchId} won '${r.letter}' for ${r.paid}`);
+    if (myBotId === null || !myMatches.has(r.matchId)) return;
+    // Price calibration: compare the clearing price with the market model.
+    const paid = Number(r.paid);
+    if (paid > 0) {
+      const c = ctxFor(conn, r.matchId);
+      const m = conn.db.matchState.id.find(r.matchId);
+      const bagLeft = Number(m?.bagTotal ?? 0);
+      const ph = brain2.phase({ bagLeft, totalAuctions: c.totalAuctions } as State);
+      const ref = brain2.row(r.letter.charCodeAt(0) - 65, ph).medSecond || 7;
+      const ratio = Math.max(0.3, Math.min(3, paid / ref));
+      c.heat = c.heat * (1 - PARAMS2.heatWeight) + ratio * PARAMS2.heatWeight;
+    }
+    if (r.winnerBotId === myBotId) console.log(`[${BOT_NAME}] m${r.matchId} won '${r.letter}' for ${r.paid}`);
   });
 
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
@@ -388,6 +514,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         `[${BOT_NAME}] match ${neu.id} ended: our score ${me?.score} balance ${me?.balance} unplayed '${left}' (all: ${all.join(", ")}); rejoining lobby`,
       );
       unwatchMatch(neu.id);
+      ctxs.delete(String(neu.id));
       joinLobby(conn);
     }
   });

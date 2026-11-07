@@ -50,6 +50,11 @@ export interface Params {
   maxFrac: number; // never bid more than this fraction of balance
   budget: number; // partition search nodes
   faceFriend: number; // 0..1: how much bingo-friendliness scales a tile's face value
+  minMidLen: number; // mid-match, only cash words at least this long...
+  starveCash: number; // ...unless balance is below this (then 5+ letters)
+  allIn: number; // go all-in on useful letters when bagLeft <= this
+  earlyMult: number; // bid multiplier at match start...
+  lateMult: number; // ...ramping linearly to this as the bag empties
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -67,6 +72,11 @@ export const DEFAULT_PARAMS: Params = {
   maxFrac: 0.6,
   budget: 3000,
   faceFriend: 0.5,
+  minMidLen: 7,
+  starveCash: 15,
+  allIn: 1,
+  earlyMult: 1,
+  lateMult: 1,
 };
 
 export interface View {
@@ -74,6 +84,8 @@ export interface View {
   balance: number;
   bagLeft: number; // tiles still in the bag, not counting the open auction
   firstPrice: boolean;
+  /** highest balance among opponents, if known (bids above it +1 buy nothing under Vickrey) */
+  maxRivalBalance?: number;
 }
 
 export class Brain {
@@ -139,19 +151,33 @@ export class Brain {
     const candsWithout = this.dict.filter(candsWith, v.rack);
     const gain = this.value(withL, after, candsWith) - this.value(v.rack, after, candsWithout);
     if (gain <= 0) return 0;
+    const cap = Math.min(v.balance, (v.maxRivalBalance ?? Infinity) + 1);
+    // Last usable auction: cash is worthless one auction from now and the tile
+    // still counts in the final flush, so spend it all (both public
+    // tournament bots converged on this).
+    if (v.bagLeft <= p.allIn && !v.firstPrice) return Math.max(0, Math.round(cap));
 
     const need = Math.max(10, v.bagLeft * p.spendPerAuction);
     const cash = Math.max(p.cashMin, Math.min(p.cashMax, Math.sqrt(v.balance / need)));
-    let amt = gain * p.kappa * cash;
+    // Top live bots bid low early and ~1.75x higher late, when unspent cash
+    // is about to become worthless.
+    const progress = Math.max(0, Math.min(1, 1 - v.bagLeft / 63));
+    const ramp = p.earlyMult + (p.lateMult - p.earlyMult) * progress;
+    let amt = gain * p.kappa * cash * ramp;
     if (v.firstPrice) amt *= 0.6; // shade: we pay what we bid
     amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
-    return Math.max(0, Math.min(v.balance, Math.round(amt)));
+    return Math.max(0, Math.min(cap, Math.round(amt)));
   }
 
   /** Words (dictionary indices) to play right now. */
   words(v: View): number[] {
     if (rackSize(v.rack) < 2) return [];
-    return this.plan(v.rack, v.bagLeft).words;
+    const ws = this.plan(v.rack, v.bagLeft).words;
+    if (v.bagLeft <= this.p.flushAt) return ws;
+    // Mid-match, hold short words: the top live bots score ~85% of their
+    // points from 7+ letter words. Cash shorter ones only when starved.
+    const min = v.balance < this.p.starveCash ? 5 : this.p.minMidLen;
+    return ws.filter((k) => this.dict.len[k] >= min);
   }
 }
 

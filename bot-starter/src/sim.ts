@@ -22,6 +22,8 @@ export interface Player {
   afterWin?(): void;
 }
 
+export let maxRival: (me: Player) => number = () => Infinity;
+
 export class Game {
   constructor(
     public d: Dict,
@@ -75,6 +77,7 @@ export class Game {
       for (const p of players) if (!p.isSim) p.tick(total);
       const bids: [Player, number][] = [];
       for (const p of players) {
+        maxRival = (me: Player) => Math.max(...players.filter((x) => x !== me).map((x) => x.balance));
         const b = Math.min(p.balance, Math.max(0, Math.floor(p.bid(letter, total, firstPrice))));
         if (b > 0) bids.push([p, b]);
       }
@@ -201,7 +204,7 @@ export function brainBot(g: Game, params: Params = DEFAULT_PARAMS, name = "brain
     score: 0,
     isSim: false,
     bid(l, bagLeft, firstPrice) {
-      return brain.bid({ rack: this.rack, balance: this.balance, bagLeft, firstPrice }, l);
+      return brain.bid({ rack: this.rack, balance: this.balance, bagLeft, firstPrice, maxRivalBalance: maxRival(this) }, l);
     },
     tick(bagLeft) {
       if (rackSize(this.rack) < 2) return;

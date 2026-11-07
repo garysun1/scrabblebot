@@ -13,12 +13,13 @@ Strategy for the ScrabbleBot auction game, built on the starter.
   (face value scaled by how often the letter shows up in 7-8 letter words, vowel
   balance and duplicate penalties). The hoard term fades to zero over the last
   ~14 auctions.
-- **Words:** plays whatever the best partition says. Mid-game that's 7+ letter words
-  (3x) as soon as they appear; short words get held. In the last two auctions it
-  plays everything.
+- **Words:** mid-game it only cashes 7+ letter words (5+ if cash drops under 15);
+  everything else is held. In the last two auctions it plays the best partition of
+  the whole rack.
 - **Bids:** `V(rack + letter) - V(rack)`, times 3, scaled by cash on hand relative to
-  what the rest of the match will cost. Never bids on the last auction (that tile can't be
-  played). Re-bids when a word play changes cash. Shades bids 40% in first-price
+  what the rest of the match will cost. Goes all-in on any useful letter in the last
+  usable auction, never bids more than the richest rival's balance + 1, and never
+  bids on the last auction (that tile can't be played). Re-bids when a word play changes cash. Shades bids 40% in first-price
   lobbies.
 
 ## Run
@@ -29,6 +30,12 @@ npm run generate                       # needs the spacetime CLI
 BOT_NAME=<name> BOT_TOKEN=<token> npm start
 BRAIN_PARAMS='{"kappa":3.5}' BOT_NAME=<name> npm start   # live tuning
 BOT_NAME=<name> TOURNAMENT_ID=<id> npm start             # register for the tournament
+```
+
+The bot exits if its feed stalls mid-match. Run it in a restart loop so it reconnects:
+
+```bash
+while true; do BOT_NAME=<name> TOURNAMENT_ID=<id> npm start 2>&1 | tee -a bot.log; sleep 1; done
 ```
 
 ## Offline simulator

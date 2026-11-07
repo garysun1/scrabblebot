@@ -99,7 +99,13 @@ function viewFor(conn: DbConnection, matchId: bigint): View | null {
   if (!m || m.status.tag !== "Running") return null;
   const part = participantForMatch(conn, matchId);
   if (!part) return null;
+  let maxRivalBalance = 0;
+  for (const p of conn.db.matchParticipant.iter()) {
+    if (p.matchId === matchId && p.botId !== myBotId)
+      maxRivalBalance = Math.max(maxRivalBalance, Number(p.balance));
+  }
   return {
+    maxRivalBalance,
     rack: rackForMatch(conn, matchId),
     balance: part.balance,
     bagLeft: Number(m.bagTotal),
@@ -266,6 +272,7 @@ function unwatchMatch(matchId: bigint) {
 }
 
 let ready = false;
+let lastAuctionSeen = Date.now();
 function onReady(conn: DbConnection) {
   // Resolve our bot id, possibly after claiming a nonce.
   myBotId = resolveMyBotId(conn);
@@ -348,7 +355,10 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     }
   });
   conn.db.auction.onInsert((_ctx, a) => {
-    if (myMatches.has(a.matchId)) refresh(conn);
+    if (myMatches.has(a.matchId)) {
+      lastAuctionSeen = Date.now();
+      refresh(conn);
+    }
   });
   conn.db.myRack.onInsert(() => refresh(conn));
   conn.db.myRack.onUpdate(() => refresh(conn));
@@ -381,6 +391,20 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       joinLobby(conn);
     }
   });
+
+  // Watchdog: a silently stalled feed mid-match means losing every auction
+  // (K-13 once finished a tournament game on 0 this way). Exit so the
+  // restart loop (see BOT.md) reconnects us.
+  setInterval(() => {
+    if (!ready || myRunningMatches(conn).length === 0) {
+      lastAuctionSeen = Date.now();
+      return;
+    }
+    if (Date.now() - lastAuctionSeen > 8000) {
+      console.error(`[${BOT_NAME}] no auction for 8s mid-match: feed stalled, exiting to reconnect`);
+      process.exit(2);
+    }
+  }, 1000);
 
   // Safety net: if we're idle (a join failed, a match end was missed), rejoin.
   setInterval(() => {

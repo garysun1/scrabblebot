@@ -53,6 +53,8 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  lateFillN: number; // in the last N auctions, don't let bids fall below lateFill if cash allows
+  lateFill: number;
   earlyMult: number; // bid multiplier at match start...
   lateMult: number; // ...ramping linearly to this as the bag empties
 }
@@ -69,14 +71,16 @@ export const DEFAULT_PARAMS: Params = {
   spendPerAuction: 3,
   cashMin: 0.5,
   cashMax: 3,
-  maxFrac: 0.6,
+  maxFrac: 1.0,
   budget: 3000,
   faceFriend: 0.5,
   minMidLen: 7,
   starveCash: 15,
   allIn: 1,
+  lateFillN: 0,
+  lateFill: 10,
   earlyMult: 1,
-  lateMult: 1,
+  lateMult: 1.3,
 };
 
 export interface View {
@@ -166,6 +170,9 @@ export class Brain {
     let amt = gain * p.kappa * cash * ramp;
     if (v.firstPrice) amt *= 0.6; // shade: we pay what we bid
     amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
+    // Endgame fill: leftover cash is worthless, so any letter with positive
+    // value is worth at least the going late price while we can afford it.
+    if (v.bagLeft <= p.lateFillN && v.balance >= (v.bagLeft + 1) * p.lateFill) amt = Math.max(amt, p.lateFill);
     return Math.max(0, Math.min(cap, Math.round(amt)));
   }
 

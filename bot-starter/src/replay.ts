@@ -246,16 +246,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     which === "v1"
       ? v1Policy(d, { ...DEFAULT_PARAMS, ...over })
       : v2Policy(d, { ...DEFAULT_PARAMS2, ...over }, rnd);
-  let P = 0, S = 0, W = 0, B = 0, Lt = 0;
+  let P = 0, S = 0, W = 0, B = 0, Lt = 0, N = 0;
   const t0 = Date.now();
   const hist = new Array(8).fill(0);
-  for (const i of idx) {
-    const r = replayMatch(d, all[i], pol, rnd);
-    P += r.place; S += r.score; W += r.place === 1 ? 1 : 0; B += r.endBal; Lt += r.letters;
-    hist[r.place]++;
+  const seeds = Number(process.env.REPLAY_SEEDS ?? 1);
+  for (let k = 0; k < seeds; k++) {
+    for (const i of idx) {
+      const r = replayMatch(d, all[i], pol, mulberry(seed * 7919 + k * 104729 + i));
+      P += r.place; S += r.score; W += r.place === 1 ? 1 : 0; B += r.endBal; Lt += r.letters; N++;
+      hist[r.place]++;
+    }
   }
   console.log(
-    `${which} ${JSON.stringify(over)} n=${n}: avg place ${(P / n).toFixed(2)} score ${(S / n).toFixed(1)} ` +
-      `win ${(W / n).toFixed(2)} letters ${(Lt / n).toFixed(1)} endbal ${(B / n).toFixed(0)} places[1..7]=${hist.slice(1).join(",")} (${((Date.now() - t0) / n).toFixed(0)}ms/match)`,
+    `${which} ${JSON.stringify(over)} n=${N}: avg place ${(P / N).toFixed(2)} score ${(S / N).toFixed(1)} ` +
+      `win ${(W / N).toFixed(2)} letters ${(Lt / N).toFixed(1)} endbal ${(B / N).toFixed(0)} places[1..7]=${hist.slice(1).join(",")} (${((Date.now() - t0) / N).toFixed(0)}ms/match)`,
   );
 }

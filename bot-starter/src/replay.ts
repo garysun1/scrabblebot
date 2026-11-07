@@ -239,10 +239,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const all = loadMatches().filter(
     (m) => m.id >= minId && (!process.env.REPLAY_REAL || !m.scores.some(([b]) => SIMS.has(b))),
   );
-  console.log(`replay pool: ${all.length} matches`);
+  // REPLAY_SPLIT=train|test: even/odd matches of the pool, for tuning without memorizing.
+  const split = process.env.REPLAY_SPLIT;
+  const pool = split ? all.filter((_, i) => (i % 2 === 0) === (split === "train")) : all;
+  if (!process.env.QUIET) console.log(`replay pool: ${pool.length} matches`);
   const rnd = mulberry(seed);
   // deterministic subset
-  const idx = all.map((_, i) => i).sort(() => rnd() - 0.5).slice(0, n);
+  const idx = pool.map((_, i) => i).sort(() => rnd() - 0.5).slice(0, n);
   const pol =
     which === "v1"
       ? v1Policy(d, { ...DEFAULT_PARAMS, ...over })
@@ -253,7 +256,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const seeds = Number(process.env.REPLAY_SEEDS ?? 1);
   for (let k = 0; k < seeds; k++) {
     for (const i of idx) {
-      const r = replayMatch(d, all[i], pol, mulberry(seed * 7919 + k * 104729 + i));
+      const r = replayMatch(d, pool[i], pol, mulberry(seed * 7919 + k * 104729 + i));
       P += r.place; S += r.score; W += r.place === 1 ? 1 : 0; B += r.endBal; Lt += r.letters; N++;
       hist[r.place]++;
     }

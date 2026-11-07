@@ -60,27 +60,29 @@ export interface Params {
 }
 
 export const DEFAULT_PARAMS: Params = {
-  alpha: 1.5,
-  friend: 1.0,
-  base: 3,
-  dupPen: 1.5,
-  vowelPen: 2.5,
-  horizon: 14,
+  // Cross-entropy search against replays of HackUTD-only tables (src/optimize.ts,
+  // 2026-11-07), validated on a held-out split and on strong-table replays.
+  alpha: 1.19,
+  friend: 0.6,
+  base: 3.2,
+  dupPen: 1.7,
+  vowelPen: 2.7,
+  horizon: 16,
   flushAt: 1,
-  kappa: 3.0,
-  spendPerAuction: 3,
+  kappa: 2.4,
+  spendPerAuction: 2.26,
   cashMin: 0.5,
-  cashMax: 3,
+  cashMax: 2.45,
   maxFrac: 1.0,
   budget: 3000,
-  faceFriend: 0.5,
+  faceFriend: 0.53,
   minMidLen: 7,
-  starveCash: 15,
+  starveCash: 19,
   allIn: 1,
-  lateFillN: 0,
-  lateFill: 10,
+  lateFillN: 16,
+  lateFill: 12,
   earlyMult: 1,
-  lateMult: 1.3,
+  lateMult: 1.4,
 };
 
 export interface View {
@@ -172,7 +174,7 @@ export class Brain {
     amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
     // Endgame fill: leftover cash is worthless, so any letter with positive
     // value is worth at least the going late price while we can afford it.
-    if (v.bagLeft <= p.lateFillN && v.balance >= (v.bagLeft + 1) * p.lateFill) amt = Math.max(amt, p.lateFill);
+    if (v.bagLeft <= p.lateFillN && v.balance >= 2 * p.lateFill) amt = Math.max(amt, p.lateFill);
     return Math.max(0, Math.min(cap, Math.round(amt)));
   }
 

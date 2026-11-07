@@ -44,13 +44,13 @@ export function mulberry(seed: number) {
 export function v2Policy(d: Dict, p: Params2, rnd: () => number): Policy & { brain: Brain2; letter: number } {
   const brain = new Brain2(d, p);
   brain.rnd = rnd;
-  let heat = 1;
+  let heat = p.heat0;
   let since = 99;
   const pol = {
     brain,
     letter: 0,
     reset() {
-      heat = 1;
+      heat = p.heat0;
       since = 99;
       brain.lambda = 0.5;
     },
@@ -152,6 +152,7 @@ export function replayMatch(d: Dict, m: MatchRec, pol: Policy & { letter: number
     firstPrice: false,
     maxRivalBalance: Math.max(...rivalBal.values()),
     heat: 1,
+    rivals: [...rivalBal].map(([id, balance]) => ({ id, balance })),
   });
 
   const play = (bagLeft: number) => {
@@ -231,7 +232,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const n = Number(process.argv[3] ?? 80);
   const seed = Number(process.argv[4] ?? 1);
   const over = JSON.parse(process.argv[5] ?? "{}");
-  const all = loadMatches();
+  // Optional filters: REPLAY_MIN_ID=42700 REPLAY_REAL=1 (no house sims at the table)
+  const SIMS = new Set([1, 2, 3, 4, 5, 6].map(BigInt).map(Number));
+  const minId = Number(process.env.REPLAY_MIN_ID ?? 0);
+  const all = loadMatches().filter(
+    (m) => m.id >= minId && (!process.env.REPLAY_REAL || !m.scores.some(([b]) => SIMS.has(b))),
+  );
+  console.log(`replay pool: ${all.length} matches`);
   const rnd = mulberry(seed);
   // deterministic subset
   const idx = all.map((_, i) => i).sort(() => rnd() - 0.5).slice(0, n);

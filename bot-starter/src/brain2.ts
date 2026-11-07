@@ -35,6 +35,30 @@ const MARKET: Market = JSON.parse(
   readFileSync(new URL("./market.json", import.meta.url), "utf8"),
 );
 const LET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const GROUP = FACE.map((f) => (f === 1 ? 0 : f <= 4 ? 1 : 2));
+
+// Per-opponent bid models fitted from the public archive (see BOT.md):
+// bid ~ p0: none; else LogNormal(market mu + off[group] + late*[phase>=3], sigma).
+export interface BotModel {
+  name: string;
+  n: number;
+  off: [number, number, number];
+  late: number;
+  sigma: number;
+  p0: number;
+}
+function loadBots(): Record<string, BotModel> {
+  const file = process.env.BOTS_FILE ?? new URL("./bots.json", import.meta.url);
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+}
+export const BOTS: Record<string, BotModel> = loadBots();
+// An unmodeled rival: a typical individual seat relative to the max-of-6 market.
+const GENERIC: BotModel = { name: "?", n: 0, off: [-0.55, -0.55, -0.5], late: 0.15, sigma: 0.5, p0: 0.15 };
+const SHRINK_N = 400; // observations at which a bot's own fit gets half weight vs generic
 
 export interface Params2 {
   samples: number; // futures per valuation (refined bid)
@@ -52,6 +76,8 @@ export interface Params2 {
   allIn: number; // bagLeft <= allIn: whole balance on any useful letter
   budget: number; // partition search nodes
   minBid: number; // bid at least this if the letter has any value
+  heat0: number; // prior price heat at match start (tonight's lobby runs ~1.45x the archive)
+  useRivals: boolean; // compose the price model from the seated opponents
 }
 
 export const DEFAULT_PARAMS2: Params2 = {
@@ -70,6 +96,8 @@ export const DEFAULT_PARAMS2: Params2 = {
   allIn: 1,
   budget: 300,
   minBid: 1,
+  heat0: 1.45,
+  useRivals: true,
 };
 
 export interface State {
@@ -81,6 +109,8 @@ export interface State {
   firstPrice: boolean;
   maxRivalBalance?: number;
   heat: number; // price multiplier, 1 = as fitted
+  /** seated opponents with their public balances; enables the per-opponent model */
+  rivals?: { id: number; balance: number }[];
 }
 
 // ---------- normal helpers ----------
@@ -118,15 +148,77 @@ export class Brain2 {
   /** Expected Vickrey payment and win probability when bidding b for `letter`. */
   expectPay(s: State, letter: number, ph: number, b: number): { pay: number; pwin: number } {
     if (b < 1) return { pay: 0, pwin: 0 };
+    if (this.p.useRivals && s.rivals && s.rivals.length > 0) return this.expectPayRivals(s, letter, ph, b);
     const r = this.row(letter, ph);
     const mu = r.mu + Math.log(s.heat);
     const sg = Math.max(0.15, r.sigma);
     const lb = Math.log(b);
     const pBelow = Phi((lb - mu) / sg); // rivals' top below our bid
     const eBelow = Math.exp(mu + (sg * sg) / 2) * Phi((lb - mu - sg * sg) / sg); // E[X; X<b]
-    // Ties at the same integer are split; approximate by b - 0.5.
     const pwin = r.nobid + (1 - r.nobid) * pBelow;
     const pay = r.nobid * 1 + (1 - r.nobid) * eBelow;
+    return { pay, pwin };
+  }
+
+  /** Model for one seated rival: shrunk toward the generic seat when data is thin. */
+  rivalModel(id: number): BotModel {
+    const m = BOTS[String(id)];
+    if (!m) return GENERIC;
+    const w = m.n / (m.n + SHRINK_N);
+    const mix = (a: number, g: number) => w * a + (1 - w) * g;
+    return {
+      name: m.name,
+      n: m.n,
+      off: [mix(m.off[0], GENERIC.off[0]), mix(m.off[1], GENERIC.off[1]), mix(m.off[2], GENERIC.off[2])],
+      late: mix(m.late, GENERIC.late),
+      sigma: Math.max(0.2, mix(m.sigma, GENERIC.sigma)),
+      p0: Math.min(0.9, Math.max(0.01, mix(m.p0, GENERIC.p0))),
+    };
+  }
+
+  /** CDF of the highest rival bid: product over seats, each truncated at its balance. */
+  maxRivalCdf(s: State, letter: number, ph: number): (x: number) => number {
+    const r = this.row(letter, ph);
+    const base = r.mu + Math.log(s.heat);
+    const g = GROUP[letter];
+    const late = ph >= 3 ? 1 : 0;
+    const seats = s.rivals!.map((rv) => {
+      const m = this.rivalModel(rv.id);
+      return { mu: base + m.off[g] + m.late * late, sg: m.sigma, p0: m.p0, bal: rv.balance };
+    });
+    return (x: number) => {
+      // P(every rival's bid <= x)
+      let p = 1;
+      for (const st of seats) {
+        if (st.bal <= 0) continue; // broke: can't bid
+        if (x >= st.bal) continue; // can't exceed its balance
+        const F = x < 1 ? 0 : Phi((Math.log(x + 0.5) - st.mu) / st.sg);
+        p *= st.p0 + (1 - st.p0) * F;
+      }
+      return p;
+    };
+  }
+
+  expectPayRivals(s: State, letter: number, ph: number, b: number): { pay: number; pwin: number } {
+    const cdf = this.maxRivalCdf(s, letter, ph);
+    const bi = Math.floor(b);
+    // Vickrey: we win if max rival < b (ties split); we pay the max rival bid (reserve 1).
+    let pay = 0;
+    let prev = cdf(0); // P(nobody bids)
+    pay += prev * 1;
+    let pwin = prev;
+    for (let x = 1; x < bi; x++) {
+      const c = cdf(x);
+      const pm = c - prev; // P(max rival == x)
+      if (pm > 0) {
+        pay += pm * x;
+        pwin += pm;
+      }
+      prev = c;
+    }
+    const tie = Math.max(0, cdf(bi) - prev);
+    pay += 0.5 * tie * bi;
+    pwin += 0.5 * tie;
     return { pay, pwin };
   }
 

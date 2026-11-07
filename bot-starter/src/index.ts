@@ -56,7 +56,7 @@ function saveToken(tok: string) {
 const DICT = Dict.load();
 // Optional live tuning: BRAIN_PARAMS='{"kappa":3.5}' npm start
 // BRAIN=v1 selects the older heuristic brain (strategy.ts); default is v2.
-const BRAIN = process.env.BRAIN ?? "v2";
+const BRAIN = process.env.BRAIN ?? "v1";
 const PARAMS = { ...DEFAULT_PARAMS, ...JSON.parse(process.env.BRAIN_PARAMS ?? "{}") };
 const PARAMS2 = { ...DEFAULT_PARAMS2, ...JSON.parse(process.env.BRAIN_PARAMS ?? "{}") };
 const brain = new Brain(DICT, PARAMS);
@@ -128,6 +128,8 @@ interface MatchCtx {
   totalAuctions: number;
 }
 const ctxs = new Map<string, MatchCtx>();
+// Price heat carried from the previous match, so a new match starts calibrated.
+let lastHeat = PARAMS2.heat0;
 function ctxFor(conn: DbConnection, matchId: bigint): MatchCtx {
   const key = String(matchId);
   let c = ctxs.get(key);
@@ -136,7 +138,7 @@ function ctxFor(conn: DbConnection, matchId: bigint): MatchCtx {
     let seats = 0;
     for (const p of conn.db.matchParticipant.iter()) if (p.matchId === matchId) seats++;
     const total = 98 - Math.max(1, seats) * Number(m?.startingRackSize ?? 5);
-    c = { heat: 1, lambdaDirty: true, refreshing: false, totalAuctions: total };
+    c = { heat: lastHeat, lambdaDirty: true, refreshing: false, totalAuctions: total };
     ctxs.set(key, c);
   }
   return c;
@@ -171,6 +173,9 @@ function stateFor(conn: DbConnection, matchId: bigint): State | null {
     firstPrice: v.firstPrice,
     maxRivalBalance: v.maxRivalBalance,
     heat: c.heat,
+    rivals: Array.from(conn.db.matchParticipant.iter())
+      .filter((p) => p.matchId === matchId && p.botId !== myBotId)
+      .map((p) => ({ id: Number(p.botId), balance: Number(p.balance) })),
   };
 }
 
@@ -514,6 +519,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         `[${BOT_NAME}] match ${neu.id} ended: our score ${me?.score} balance ${me?.balance} unplayed '${left}' (all: ${all.join(", ")}); rejoining lobby`,
       );
       unwatchMatch(neu.id);
+      lastHeat = ctxs.get(String(neu.id))?.heat ?? lastHeat;
       ctxs.delete(String(neu.id));
       joinLobby(conn);
     }

@@ -218,7 +218,16 @@ export function brainBot(g: Game, params: Params = DEFAULT_PARAMS, name = "brain
 
 export type Mix = (g: Game) => Player[];
 
+const OLD = { ...DEFAULT_PARAMS, kappa: 3, spendPerAuction: 3, alpha: 1.5, base: 3, friend: 1, cashMax: 3, horizon: 14, lateFillN: 0, lateMult: 1.3, minBid: 0 };
+const EXTRA = JSON.parse(process.env.BRAIN_PARAMS ?? "{}");
 export const MIXES: Record<string, Mix> = {
+  // bracket / final tables
+  hu_field: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), fieldBot(g, 1, "field")],
+  hu_greedy: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), greedyBot(g, 2, "greedy2")],
+  hu_old: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), brainBot(g, OLD, "old")],
+  hu_cheap: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), simBot(g, "cheap", "cheap")],
+  three: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), brainBot(g, OLD, "old"), fieldBot(g, 1, "field")],
+  four: (g) => [brainBot(g, { ...DEFAULT_PARAMS, ...EXTRA }), brainBot(g, OLD, "old"), fieldBot(g, 1, "field"), greedyBot(g, 3, "greedy3")],
   // A lobby padded with house sims.
   sims: (g) => {
     const kinds = ["cheap", "value", "aggr", "value", "aggr", "cheap"] as const;

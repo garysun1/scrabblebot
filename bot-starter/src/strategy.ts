@@ -53,6 +53,7 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  minBid: number; // bid at least this on any playable letter (tiles have no holding cost; reserve is 1)
   lateFillN: number; // in the last N auctions, don't let bids fall below lateFill if cash allows
   lateFill: number;
   earlyMult: number; // bid multiplier at match start...
@@ -79,6 +80,7 @@ export const DEFAULT_PARAMS: Params = {
   minMidLen: 7,
   starveCash: 19,
   allIn: 1,
+  minBid: 1,
   lateFillN: 16,
   lateFill: 12,
   earlyMult: 1,
@@ -156,8 +158,8 @@ export class Brain {
     const candsWith = this.dict.candidates(withL);
     const candsWithout = this.dict.filter(candsWith, v.rack);
     const gain = this.value(withL, after, candsWith) - this.value(v.rack, after, candsWithout);
-    if (gain <= 0) return 0;
     const cap = Math.min(v.balance, (v.maxRivalBalance ?? Infinity) + 1);
+    if (gain <= 0) return Math.min(cap, p.minBid);
     // Last usable auction: cash is worthless one auction from now and the tile
     // still counts in the final flush, so spend it all (both public
     // tournament bots converged on this).
@@ -175,6 +177,7 @@ export class Brain {
     // Endgame fill: leftover cash is worthless, so any letter with positive
     // value is worth at least the going late price while we can afford it.
     if (v.bagLeft <= p.lateFillN && v.balance >= 2 * p.lateFill) amt = Math.max(amt, p.lateFill);
+    amt = Math.max(amt, p.minBid);
     return Math.max(0, Math.min(cap, Math.round(amt)));
   }
 

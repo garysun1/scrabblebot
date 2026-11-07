@@ -118,13 +118,16 @@ function logFailure(what: string) {
     );
 }
 
+// Matches we've been seated in (participant rows with our bot id). Kept
+// as a set so refreshes don't scan every participant row on the server.
+const myMatches = new Set<bigint>();
+
 function myRunningMatches(conn: DbConnection): bigint[] {
   if (myBotId === null) return [];
   const out: bigint[] = [];
-  for (const p of conn.db.matchParticipant.iter()) {
-    if (p.botId !== myBotId) continue;
-    const m = conn.db.matchState.id.find(p.matchId);
-    if (m?.status.tag === "Running") out.push(p.matchId);
+  for (const id of myMatches) {
+    const m = conn.db.matchState.id.find(id);
+    if (m?.status.tag === "Running") out.push(id);
   }
   return out;
 }
@@ -197,62 +200,162 @@ function refresh(conn: DbConnection) {
   });
 }
 
+// Subscriptions. Subscribing to every table pulls the whole server's history
+// (millions of auction rows) and every live match's updates, which made the
+// bot see auctions after they had closed. Instead we subscribe to:
+//   1. bot_credential + bot (small) and my_rack (ours only)
+//   2. match_participant rows for our bot
+//   3. for each match we're seated in: its match_state, auctions,
+//      participants and results
+// If the server rejects these queries we fall back to everything.
+// Force the old behaviour with SUBSCRIBE_ALL=1.
+let fallback = process.env.SUBSCRIBE_ALL === "1";
+const matchSubs = new Map<string, { unsubscribe(): void }>();
+
+function goFallback(conn: DbConnection, why: string) {
+  if (fallback) return;
+  fallback = true;
+  console.warn(`[${BOT_NAME}] narrow subscription failed (${why}); subscribing to all tables`);
+  conn
+    .subscriptionBuilder()
+    .onApplied(() => onReady(conn))
+    .subscribeToAllTables();
+}
+
+function errText(ctx: unknown): string {
+  const e = (ctx as { event?: unknown })?.event ?? ctx;
+  return e instanceof Error ? e.message : String(e);
+}
+
+function watchMatch(conn: DbConnection, matchId: bigint) {
+  myMatches.add(matchId);
+  if (fallback) {
+    refresh(conn);
+    return;
+  }
+  const key = String(matchId);
+  if (matchSubs.has(key)) return;
+  const h = conn
+    .subscriptionBuilder()
+    .onApplied(() => {
+      const m = conn.db.matchState.id.find(matchId);
+      console.log(`[${BOT_NAME}] watching match ${matchId} (${m?.status.tag ?? "?"})`);
+      refresh(conn);
+    })
+    .onError((ctx: unknown) => goFallback(conn, errText(ctx)))
+    .subscribe([
+      `SELECT * FROM match_state WHERE id = ${matchId}`,
+      `SELECT * FROM auction WHERE match_id = ${matchId}`,
+      `SELECT * FROM match_participant WHERE match_id = ${matchId}`,
+      `SELECT * FROM auction_result WHERE match_id = ${matchId}`,
+    ]);
+  matchSubs.set(key, h);
+}
+
+function unwatchMatch(matchId: bigint) {
+  const key = String(matchId);
+  const h = matchSubs.get(key);
+  matchSubs.delete(key);
+  if (h) setTimeout(() => {
+    try {
+      h.unsubscribe();
+    } catch {
+      /* already gone */
+    }
+  }, 2000);
+}
+
+let ready = false;
+function onReady(conn: DbConnection) {
+  // Resolve our bot id, possibly after claiming a nonce.
+  myBotId = resolveMyBotId(conn);
+  if (myBotId === null) {
+    if (BOT_NONCE) {
+      console.log(`[${BOT_NAME}] claiming credential with nonce…`);
+      conn.reducers
+        .claimCredential({ code: BOT_NONCE })
+        .catch(logFailure("claiming the credential"));
+      setTimeout(() => {
+        myBotId = resolveMyBotId(conn);
+        if (myBotId === null) {
+          console.error(`[${BOT_NAME}] couldn't claim credential. Bad / expired nonce?`);
+          process.exit(1);
+        }
+        onReady(conn);
+      }, 1500);
+      return;
+    }
+    console.error(
+      `[${BOT_NAME}] no BotCredential for this token. Set BOT_TOKEN or BOT_NONCE and re-run.`,
+    );
+    process.exit(1);
+  }
+  const bot = conn.db.bot.id.find(myBotId);
+  console.log(`[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`);
+
+  const start = () => {
+    if (ready) return;
+    ready = true;
+    // Only our newest match can still be running.
+    let newest: bigint | null = null;
+    for (const p of conn.db.matchParticipant.iter()) {
+      if (p.botId !== myBotId) continue;
+      if (fallback) myMatches.add(p.matchId);
+      if (newest === null || p.matchId > newest) newest = p.matchId;
+    }
+    if (newest !== null) watchMatch(conn, newest);
+    bootstrapActivity(conn);
+  };
+  if (fallback) {
+    start();
+    return;
+  }
+  conn
+    .subscriptionBuilder()
+    .onApplied(start)
+    .onError((ctx: unknown) => goFallback(conn, errText(ctx)))
+    .subscribe([`SELECT * FROM match_participant WHERE bot_id = ${myBotId}`]);
+}
+
 function onConnect(conn: DbConnection, identity: Identity, token: string) {
   myIdentity = identity;
   saveToken(token);
   console.log(`[${BOT_NAME}] connected as ${identity.toHexString()}`);
 
-  conn
-    .subscriptionBuilder()
-    .onApplied(() => {
-      console.log(`[${BOT_NAME}] subscription applied`);
+  if (fallback) {
+    fallback = false;
+    goFallback(conn, "SUBSCRIBE_ALL=1");
+  } else {
+    conn
+      .subscriptionBuilder()
+      .onApplied(() => {
+        console.log(`[${BOT_NAME}] subscription applied`);
+        onReady(conn);
+      })
+      .onError((ctx: unknown) => goFallback(conn, errText(ctx)))
+      .subscribe([
+        "SELECT * FROM bot_credential",
+        "SELECT * FROM bot",
+        "SELECT * FROM my_rack",
+      ]);
+  }
 
-      // Resolve our bot id, possibly after claiming a nonce.
-      myBotId = resolveMyBotId(conn);
-      if (myBotId === null) {
-        if (BOT_NONCE) {
-          console.log(`[${BOT_NAME}] claiming credential with nonce…`);
-          conn.reducers
-            .claimCredential({ code: BOT_NONCE })
-            .catch(logFailure("claiming the credential"));
-          // Wait briefly for the credential to land; check again.
-          setTimeout(() => {
-            myBotId = resolveMyBotId(conn);
-            if (myBotId === null) {
-              console.error(
-                `[${BOT_NAME}] couldn't claim credential. Bad / expired nonce?`,
-              );
-              process.exit(1);
-            }
-            const bot = conn.db.bot.id.find(myBotId);
-            console.log(
-              `[${BOT_NAME}] claimed credential for bot '${bot?.name ?? "?"}' (id ${myBotId})`,
-            );
-            bootstrapActivity(conn);
-          }, 1000);
-          return;
-        } else {
-          console.error(
-            `[${BOT_NAME}] no BotCredential for this token. Set BOT_TOKEN or BOT_NONCE and re-run.`,
-          );
-          process.exit(1);
-        }
-      }
-
-      const bot = conn.db.bot.id.find(myBotId);
-      console.log(
-        `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`,
-      );
-      bootstrapActivity(conn);
-    })
-    .subscribeToAllTables();
-
-  conn.db.auction.onInsert(() => refresh(conn));
+  // A new seat for us: start watching that match.
+  conn.db.matchParticipant.onInsert((_ctx, p) => {
+    if (ready && myBotId !== null && p.botId === myBotId && !myMatches.has(p.matchId)) {
+      console.log(`[${BOT_NAME}] seated in match ${p.matchId}`);
+      watchMatch(conn, p.matchId);
+    }
+  });
+  conn.db.auction.onInsert((_ctx, a) => {
+    if (myMatches.has(a.matchId)) refresh(conn);
+  });
   conn.db.myRack.onInsert(() => refresh(conn));
   conn.db.myRack.onUpdate(() => refresh(conn));
   conn.db.myRack.onDelete(() => refresh(conn));
-  conn.db.matchState.onUpdate(() => refresh(conn));
-  conn.db.matchParticipant.onUpdate(() => refresh(conn));
+  conn.db.matchParticipant.onUpdate((_ctx, _o, p) => {
+    if (myMatches.has(p.matchId)) refresh(conn);
+  });
   conn.db.botCredential.onInsert(() => {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
   });
@@ -261,47 +364,39 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     console.log(`[${BOT_NAME}] m${r.matchId} won '${r.letter}' for ${r.paid}`);
   });
 
-  // When a match this bot was in ends, hop back into the lobby.
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
-    if (myBotId === null) return;
+    if (!myMatches.has(neu.id)) return;
+    refresh(conn);
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
-      const wasIn = Array.from(conn.db.matchParticipant.iter()).some(
-        (p) => p.matchId === neu.id && p.botId === myBotId,
+      const me = participantForMatch(conn, neu.id);
+      const all = Array.from(conn.db.matchParticipant.iter())
+        .filter((p) => p.matchId === neu.id)
+        .map((p) => Number(p.score))
+        .sort((a, b) => b - a);
+      const left = rackToString(rackForMatch(conn, neu.id));
+      console.log(
+        `[${BOT_NAME}] match ${neu.id} ended: our score ${me?.score} balance ${me?.balance} unplayed '${left}' (all: ${all.join(", ")}); rejoining lobby`,
       );
-      if (wasIn) {
-        const me = participantForMatch(conn, neu.id);
-        const all = Array.from(conn.db.matchParticipant.iter())
-          .filter((p) => p.matchId === neu.id)
-          .map((p) => Number(p.score))
-          .sort((a, b) => b - a);
-        console.log(
-          `[${BOT_NAME}] match ${neu.id} ended: our score ${me?.score} (all: ${all.join(", ")}); rejoining lobby`,
-        );
-        joinLobby(conn);
-      }
+      unwatchMatch(neu.id);
+      joinLobby(conn);
     }
   });
+
+  // Safety net: if we're idle (a join failed, a match end was missed), rejoin.
+  setInterval(() => {
+    if (ready && myRunningMatches(conn).length === 0) joinLobby(conn, true);
+  }, 30_000);
 }
 
-function joinLobby(conn: DbConnection) {
+// join_lobby is idempotent on the server, so no need to check lobby tables.
+let lastJoin = 0;
+function joinLobby(conn: DbConnection, quiet = false) {
   if (myBotId === null) return;
-  const inRunning = Array.from(conn.db.matchParticipant.iter()).some((p) => {
-    if (p.botId !== myBotId) return false;
-    const m = conn.db.matchState.id.find(p.matchId);
-    return m?.status.tag === "Running";
-  });
-  if (inRunning) return;
-  const openLobby = Array.from(conn.db.lobby.iter()).find(
-    (l) => l.status.tag === "Open",
-  );
-  const alreadyIn =
-    openLobby !== undefined &&
-    Array.from(conn.db.lobbyMember.iter()).some(
-      (lm) => lm.lobbyId === openLobby.id && lm.botId === myBotId,
-    );
-  if (alreadyIn) return;
-  console.log(`[${BOT_NAME}] joining lobby`);
-  conn.reducers.joinLobby({}).catch(logFailure("joining the lobby"));
+  if (myRunningMatches(conn).length > 0) return;
+  if (Date.now() - lastJoin < 2000) return;
+  lastJoin = Date.now();
+  if (!quiet) console.log(`[${BOT_NAME}] joining lobby`);
+  conn.reducers.joinLobby({}).catch(quiet ? () => {} : logFailure("joining the lobby"));
 }
 
 function bootstrapActivity(conn: DbConnection) {

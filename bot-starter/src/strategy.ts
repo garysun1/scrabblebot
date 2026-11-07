@@ -1,63 +1,159 @@
-// Edit this file to implement your bidding and word-forming strategy.
+// Strategy: value a rack, bid the marginal value of each letter, and decide
+// which words to cash in.
+//
+// Rules that drive the design (from the module source):
+//  * Score only comes from words; cash is just a means. Leftover cash and
+//    leftover tiles are both worth nothing at the end.
+//  * No rack limit, so hoarding toward 7+ letter words (3x) is free apart
+//    from cash flow.
+//  * Unbid tiles are discarded, so the match is exactly
+//    98 - players*startingRack auctions; `bagTotal` tells us how many remain.
+//  * The match ends the instant the last auction closes: a letter won in the
+//    last auction can never be played, and words must be in before then.
+//
+// V(rack) = max over sets of disjoint words of
+//             sum(reward(word)) + (1 - beta) * hoard(leftover tiles)
+// where beta ramps 0 -> 1 as the bag empties (hoarded tiles stop having a
+// future). A letter's bid is V(rack + letter) - V(rack), scaled by how much
+// cash we have relative to what the rest of the match will cost.
 
-// Standard Scrabble letter values — useful for valuation.
-export const LETTER_VALUE: Record<string, number> = {
-  A: 1, B: 3, C: 3, D: 2, E: 1, F: 4, G: 2, H: 4, I: 1, J: 8,
-  K: 5, L: 1, M: 3, N: 1, O: 1, P: 3, Q: 10, R: 1, S: 1, T: 1,
-  U: 1, V: 4, W: 4, X: 8, Y: 4, Z: 10,
+import {
+  BAG_COUNTS,
+  Dict,
+  FACE,
+  type Rack,
+  VOWEL,
+  bestPartition,
+  rackSize,
+} from "./engine.js";
+
+// Relative frequency of each letter in 7-8 letter words vs. in the bag
+// (computed from the ENABLE list). >1 means the letter helps make bingos.
+const FRIEND = [
+  0.85, 1.13, 1.84, 1.0, 0.94, 0.76, 1.01, 1.2, 0.87, 0.23, 1.33, 1.4, 1.4, 0.99,
+  0.76, 1.41, 0.2, 1.14, 2.19, 0.93, 0.92, 0.48, 0.57, 0.33, 0.85, 0.45,
+];
+const DUP_CAP = "AEIONRSTL".split("").map((c) => c.charCodeAt(0) - 65);
+
+export interface Params {
+  alpha: number; // hoard value per face point of a kept tile (early game)
+  friend: number; // bonus per unit of bingo-friendliness
+  base: number; // flat value of any kept tile (it's a future word slot)
+  dupPen: number; // penalty per tile beyond the duplicate cap
+  vowelPen: number; // penalty per tile of vowel/consonant imbalance
+  horizon: number; // beta reaches 1 when this many auctions remain... scaled
+  flushAt: number; // bagLeft <= flushAt -> play the final partition
+  kappa: number; // coins per point of marginal value
+  spendPerAuction: number; // expected spend per remaining auction
+  cashMin: number; // clamp for cash factor
+  cashMax: number;
+  maxFrac: number; // never bid more than this fraction of balance
+  budget: number; // partition search nodes
+  faceFriend: number; // 0..1: how much bingo-friendliness scales a tile's face value
+}
+
+export const DEFAULT_PARAMS: Params = {
+  alpha: 2.0,
+  friend: 1.0,
+  base: 1.5,
+  dupPen: 1.5,
+  vowelPen: 1.2,
+  horizon: 14,
+  flushAt: 1,
+  kappa: 3.0,
+  spendPerAuction: 3,
+  cashMin: 0.5,
+  cashMax: 3,
+  maxFrac: 0.6,
+  budget: 3000,
+  faceFriend: 0.5,
 };
 
-export interface BidContext {
-  letter: string;        // Letter being auctioned, e.g. "Q"
-  myBalance: number;     // Current balance
-  myRack: Map<string, number>; // Letters you currently own, letter -> count
+export interface View {
+  rack: Rack;
+  balance: number;
+  bagLeft: number; // tiles still in the bag, not counting the open auction
+  firstPrice: boolean;
 }
 
-/**
- * Decide how much to bid for `letter`. Return 0 to skip.
- * Default: bid the letter's face value plus a small premium if you don't have one yet.
- */
-export function decideBid(ctx: BidContext): number {
-  const value = LETTER_VALUE[ctx.letter] ?? 1;
-  const have = ctx.myRack.get(ctx.letter) ?? 0;
-  // Pay slightly above face value for letters you don't have yet.
-  const want = have === 0 ? value + 2 : Math.max(1, value);
-  return Math.min(want, Math.max(0, ctx.myBalance));
-}
+export class Brain {
+  constructor(
+    public dict: Dict,
+    public p: Params = DEFAULT_PARAMS,
+  ) {}
 
-export interface WordContext {
-  myRack: Map<string, number>;
-  dictionary: string[]; // Sorted uppercase list, shared at startup
-}
-
-/**
- * Try to form a word using letters from `myRack`.
- * Return the word (uppercase) to play, or null to skip.
- *
- * Default strategy: greedily find the longest playable word in the dictionary.
- *
- * Keep this fast. The bot runs it on every rack change, and while it runs
- * the bot can't see the match move on: a search that takes longer than an
- * auction means bids on closed auctions and words from spent letters.
- */
-export function chooseWord(ctx: WordContext): string | null {
-  let tiles = 0;
-  for (const count of ctx.myRack.values()) tiles += count;
-
-  // The dictionary is longest first, so the first word we can spell is
-  // the longest.
-  for (const word of ctx.dictionary) {
-    if (word.length <= tiles && canSpell(word, ctx.myRack)) return word;
+  beta(bagLeft: number): number {
+    if (bagLeft <= this.p.flushAt) return 1;
+    return Math.max(0, Math.min(1, 1 - (bagLeft - this.p.flushAt) / this.p.horizon));
   }
-  return null;
+
+  /** Heuristic future value of tiles we keep. */
+  hoard(r: Rack): number {
+    const p = this.p;
+    let v = 0;
+    let vow = 0;
+    let n = 0;
+    for (let i = 0; i < 26; i++) {
+      const c = r[i];
+      if (c <= 0) continue;
+      n += c;
+      if (VOWEL[i]) vow += c;
+      const cap = DUP_CAP.includes(i) ? 2 : 1;
+      const fscale = 1 - p.faceFriend + p.faceFriend * Math.min(FRIEND[i], 1.5);
+      const each = FACE[i] * p.alpha * fscale + p.base + p.friend * (FRIEND[i] - 1);
+      const keep = Math.min(c, cap);
+      v += keep * each + (c - keep) * (each * 0.5 - p.dupPen);
+    }
+    if (n > 0) {
+      const ideal = 0.42 * n;
+      const off = Math.abs(vow - ideal);
+      v -= p.vowelPen * Math.max(0, off - 1) ** 1.5;
+    }
+    // Q without U is nearly dead weight.
+    if (r[16] > 0 && r[20] === 0) v -= FACE[16] * p.alpha * 0.6;
+    return v;
+  }
+
+  /** Best plan for this rack: which words to play and the total value. */
+  plan(r: Rack, bagLeft: number, cands?: number[]) {
+    const b = this.beta(bagLeft);
+    const c = cands ?? this.dict.candidates(r);
+    const left = b >= 1 ? () => 0 : (x: Rack) => (1 - b) * this.hoard(x);
+    return bestPartition(this.dict, r, c, left, this.p.budget);
+  }
+
+  value(r: Rack, bagLeft: number, cands?: number[]): number {
+    return this.plan(r, bagLeft, cands).score;
+  }
+
+  /** Coins to bid for `letter` (0..25). */
+  bid(v: View, letter: number): number {
+    // The last auction's letter can never be played.
+    if (v.bagLeft <= 0) return 0;
+    const p = this.p;
+    // Value is judged as of the next auction, when the tile would arrive.
+    const after = v.bagLeft - 1;
+    const withL = Int8Array.from(v.rack);
+    withL[letter]++;
+    const candsWith = this.dict.candidates(withL);
+    const candsWithout = this.dict.filter(candsWith, v.rack);
+    const gain = this.value(withL, after, candsWith) - this.value(v.rack, after, candsWithout);
+    if (gain <= 0) return 0;
+
+    const need = Math.max(10, v.bagLeft * p.spendPerAuction);
+    const cash = Math.max(p.cashMin, Math.min(p.cashMax, Math.sqrt(v.balance / need)));
+    let amt = gain * p.kappa * cash;
+    if (v.firstPrice) amt *= 0.6; // shade: we pay what we bid
+    amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
+    return Math.max(0, Math.min(v.balance, Math.round(amt)));
+  }
+
+  /** Words (dictionary indices) to play right now. */
+  words(v: View): number[] {
+    if (rackSize(v.rack) < 2) return [];
+    return this.plan(v.rack, v.bagLeft).words;
+  }
 }
 
-// Whether `rack` has every letter of `word`, counting repeats.
-function canSpell(word: string, rack: Map<string, number>): boolean {
-  const used: Record<string, number> = {};
-  for (const c of word) {
-    used[c] = (used[c] ?? 0) + 1;
-    if (used[c] > (rack.get(c) ?? 0)) return false;
-  }
-  return true;
-}
+/** Bag composition helper (exported for the simulator/tests). */
+export const BAG = BAG_COUNTS;

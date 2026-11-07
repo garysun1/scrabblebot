@@ -27,7 +27,8 @@ import {
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { chooseWord, decideBid } from "./strategy.js";
+import { Dict, type Rack, rackFromMap, rackToString } from "./engine.js";
+import { Brain, DEFAULT_PARAMS, type View } from "./strategy.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -48,28 +49,22 @@ function saveToken(tok: string) {
   fs.writeFileSync(TOKEN_PATH, tok);
 }
 
-// Load the shared wordlist so the bot can pick playable words locally.
-const dictionaryPath = path.join(
-  path.dirname(new URL(import.meta.url).pathname),
-  "..",
-  "..",
-  "spacetimedb",
-  "wordlist.txt",
-);
-const DICTIONARY: string[] = fs.existsSync(dictionaryPath)
-  ? fs
-      .readFileSync(dictionaryPath, "utf8")
-      .split("\n")
-      .map((l) => l.trim().toUpperCase())
-      .filter((l) => l.length >= 2)
-  : [];
-DICTIONARY.sort((a, b) => b.length - a.length); // longest first for greedy pick
+// Word engine + strategy (see strategy.ts). Loading builds an anagram index
+// over the ENABLE list (~0.4s).
+const DICT = Dict.load();
+// Optional live tuning: BRAIN_PARAMS='{"kappa":3.5}' npm start
+const PARAMS = { ...DEFAULT_PARAMS, ...JSON.parse(process.env.BRAIN_PARAMS ?? "{}") };
+const brain = new Brain(DICT, PARAMS);
+console.log(`[${BOT_NAME}] params ${JSON.stringify(PARAMS)}`);
+console.log(`[${BOT_NAME}] dictionary: ${DICT.n} anagram classes`);
 
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;
-const bidsByAuction = new Set<string>();
-const lastWordAttemptByMatch = new Map<string, number>();
-const WORD_RETRY_MS = 500;
+// auction id -> amount we last bid (bids can be replaced while open)
+const lastBid = new Map<string, number>();
+// match id -> word play in flight
+const playing = new Set<string>();
+const replay = new Set<string>();
 
 function resolveMyBotId(conn: DbConnection): bigint | null {
   if (!myIdentity) return null;
@@ -77,16 +72,13 @@ function resolveMyBotId(conn: DbConnection): bigint | null {
   return cred ? cred.botId : null;
 }
 
-function rackForMatch(
-  conn: DbConnection,
-  matchId: bigint,
-): Map<string, number> {
-  const rack = new Map<string, number>();
+function rackForMatch(conn: DbConnection, matchId: bigint): Rack {
+  const m = new Map<string, number>();
   for (const h of conn.db.myRack.iter()) {
     if (h.matchId !== matchId) continue;
-    rack.set(h.letter, (rack.get(h.letter) ?? 0) + h.count);
+    m.set(h.letter, (m.get(h.letter) ?? 0) + h.count);
   }
-  return rack;
+  return rackFromMap(m);
 }
 
 function participantForMatch(
@@ -102,6 +94,19 @@ function participantForMatch(
   return null;
 }
 
+function viewFor(conn: DbConnection, matchId: bigint): View | null {
+  const m = conn.db.matchState.id.find(matchId);
+  if (!m || m.status.tag !== "Running") return null;
+  const part = participantForMatch(conn, matchId);
+  if (!part) return null;
+  return {
+    rack: rackForMatch(conn, matchId),
+    balance: part.balance,
+    bagLeft: Number(m.bagTotal),
+    firstPrice: m.auctionType.tag === "FirstPrice",
+  };
+}
+
 // A reducer call fails when the module refuses it, often for an expected
 // reason: a word played just after its match ended, a bid that missed the
 // auction's window. Log it and keep playing; an uncaught failure would stop
@@ -113,57 +118,83 @@ function logFailure(what: string) {
     );
 }
 
-function tryBid(
-  conn: DbConnection,
-  auctionId: bigint,
-  matchId: bigint,
-  letter: string,
-) {
-  if (myBotId === null) return;
-  const key = `${matchId}:${auctionId}`;
-  if (bidsByAuction.has(key)) return;
-  const participant = participantForMatch(conn, matchId);
-  if (!participant) return;
-  const amount = decideBid({
-    letter,
-    myBalance: participant.balance,
-    myRack: rackForMatch(conn, matchId),
-  });
-  if (amount <= 0) return;
-  conn.reducers
-    .submitBid({ auctionId, amount: BigInt(amount) })
-    .catch(logFailure(`bid on auction ${auctionId}`));
-  bidsByAuction.add(key);
-  console.log(
-    `[${BOT_NAME}] bid ${amount} on '${letter}' (match ${matchId}, auction ${auctionId})`,
-  );
-}
-
-function tryPlayWord(conn: DbConnection) {
-  if (myBotId === null) return;
-  // Only matches still being played. The bot keeps its letters from
-  // matches that have ended, but can't play them.
-  const matches = new Set<bigint>();
+function myRunningMatches(conn: DbConnection): bigint[] {
+  if (myBotId === null) return [];
+  const out: bigint[] = [];
   for (const p of conn.db.matchParticipant.iter()) {
     if (p.botId !== myBotId) continue;
     const m = conn.db.matchState.id.find(p.matchId);
-    if (m?.status.tag === "Running") matches.add(p.matchId);
+    if (m?.status.tag === "Running") out.push(p.matchId);
   }
-  const now = Date.now();
-  for (const matchId of matches) {
-    const key = String(matchId);
-    if (now - (lastWordAttemptByMatch.get(key) ?? 0) < WORD_RETRY_MS) continue;
-    lastWordAttemptByMatch.set(key, now);
-    const word = chooseWord({
-      myRack: rackForMatch(conn, matchId),
-      dictionary: DICTIONARY,
-    });
-    if (!word) continue;
-    console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
-    conn.reducers
-      .submitWord({ matchId, word })
-      .catch(logFailure(`playing '${word}'`));
+  return out;
+}
+
+// Bid (or re-bid, if our valuation moved) on the open auction of a match.
+function tryBid(conn: DbConnection, matchId: bigint) {
+  if (myBotId === null) return;
+  const m = conn.db.matchState.id.find(matchId);
+  if (!m || m.status.tag !== "Running" || m.currentAuctionId == null) return;
+  const a = conn.db.auction.id.find(m.currentAuctionId);
+  if (!a || a.status.tag !== "Open") return;
+  const v = viewFor(conn, matchId);
+  if (!v) return;
+  const t0 = performance.now();
+  const letter = a.letter.charCodeAt(0) - 65;
+  const amount = brain.bid(v, letter);
+  const key = String(a.id);
+  const prev = lastBid.get(key);
+  if (prev === amount || (prev === undefined && amount <= 0)) return;
+  lastBid.set(key, amount);
+  conn.reducers
+    .submitBid({ auctionId: a.id, amount: BigInt(amount) })
+    .catch(logFailure(`bid on auction ${a.id}`));
+  console.log(
+    `[${BOT_NAME}] m${matchId} '${a.letter}' bid ${amount}${prev !== undefined ? ` (was ${prev})` : ""} ` +
+      `bal ${v.balance} bag ${v.bagLeft} rack ${rackToString(v.rack)} (${(performance.now() - t0).toFixed(0)}ms)`,
+  );
+}
+
+// Play whatever words the strategy wants now, one at a time.
+function tryPlayWords(conn: DbConnection, matchId: bigint) {
+  const key = String(matchId);
+  if (playing.has(key)) {
+    replay.add(key);
+    return;
   }
+  const v = viewFor(conn, matchId);
+  if (!v) return;
+  const words = brain.words(v).map((k) => DICT.word[k]);
+  if (words.length === 0) return;
+  playing.add(key);
+  // The words are disjoint, so send them all at once: in the end-game flush
+  // a round trip per word could miss the last auction's window.
+  console.log(`[${BOT_NAME}] m${matchId} playing ${words.join(" ")} (bag ${v.bagLeft})`);
+  const sends = words.map((word) =>
+    conn.reducers.submitWord({ matchId, word }).catch(logFailure(`playing '${word}'`)),
+  );
+  // Don't let a lost reply wedge this match.
+  const timeout = new Promise((r) => setTimeout(r, 3000));
+  Promise.race([Promise.allSettled(sends), timeout]).then(() => {
+    playing.delete(key);
+    if (replay.delete(key)) tryPlayWords(conn, matchId);
+    // Cash went up: our bid on the open auction may want to rise.
+    tryBid(conn, matchId);
+  });
+}
+
+// Re-evaluate everything for every running match. Deferred a tick so the
+// client cache holds the whole transaction (rack + new auction) first.
+let scheduled = false;
+function refresh(conn: DbConnection) {
+  if (scheduled) return;
+  scheduled = true;
+  setImmediate(() => {
+    scheduled = false;
+    for (const matchId of myRunningMatches(conn)) {
+      tryPlayWords(conn, matchId);
+      tryBid(conn, matchId);
+    }
+  });
 }
 
 function onConnect(conn: DbConnection, identity: Identity, token: string) {
@@ -216,23 +247,18 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     })
     .subscribeToAllTables();
 
-  conn.db.auction.onInsert((_ctx: EventContext, a) => {
-    if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
-  });
-  conn.db.myRack.onInsert(() => tryPlayWord(conn));
-  conn.db.myRack.onUpdate(() => tryPlayWord(conn));
+  conn.db.auction.onInsert(() => refresh(conn));
+  conn.db.myRack.onInsert(() => refresh(conn));
+  conn.db.myRack.onUpdate(() => refresh(conn));
+  conn.db.myRack.onDelete(() => refresh(conn));
+  conn.db.matchState.onUpdate(() => refresh(conn));
+  conn.db.matchParticipant.onUpdate(() => refresh(conn));
   conn.db.botCredential.onInsert(() => {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
-    if (myBotId === null) return;
-    const winner =
-      r.winnerBotId !== undefined && r.winnerBotId !== null
-        ? String(r.winnerBotId)
-        : "no-bid";
-    console.log(
-      `[${BOT_NAME}] match ${r.matchId} auction ${r.auctionId} '${r.letter}' → bot ${winner} paid ${r.paid}`,
-    );
+    if (myBotId === null || r.winnerBotId !== myBotId) return;
+    console.log(`[${BOT_NAME}] m${r.matchId} won '${r.letter}' for ${r.paid}`);
   });
 
   // When a match this bot was in ends, hop back into the lobby.
@@ -243,7 +269,14 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         (p) => p.matchId === neu.id && p.botId === myBotId,
       );
       if (wasIn) {
-        console.log(`[${BOT_NAME}] match ${neu.id} ended; rejoining lobby`);
+        const me = participantForMatch(conn, neu.id);
+        const all = Array.from(conn.db.matchParticipant.iter())
+          .filter((p) => p.matchId === neu.id)
+          .map((p) => Number(p.score))
+          .sort((a, b) => b - a);
+        console.log(
+          `[${BOT_NAME}] match ${neu.id} ended: our score ${me?.score} (all: ${all.join(", ")}); rejoining lobby`,
+        );
         joinLobby(conn);
       }
     }
@@ -281,10 +314,7 @@ function bootstrapActivity(conn: DbConnection) {
       .catch(logFailure(`registering for tournament ${TOURNAMENT_ID}`));
   }
   joinLobby(conn);
-  for (const a of conn.db.auction.iter()) {
-    if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
-  }
-  tryPlayWord(conn);
+  refresh(conn);
 }
 
 function main() {

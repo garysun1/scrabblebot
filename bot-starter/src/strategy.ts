@@ -17,6 +17,7 @@
 // future). A letter's bid is V(rack + letter) - V(rack), scaled by how much
 // cash we have relative to what the rest of the match will cost.
 
+import { readFileSync } from "node:fs";
 import {
   BAG_COUNTS,
   Dict,
@@ -33,6 +34,24 @@ const FRIEND = [
   0.85, 1.13, 1.84, 1.0, 0.94, 0.76, 1.01, 1.2, 0.87, 0.23, 1.33, 1.4, 1.4, 0.99,
   0.76, 1.41, 0.2, 1.14, 2.19, 0.93, 0.92, 0.48, 0.57, 0.33, 0.85, 0.45,
 ];
+// Market medians (winning bid per letter x phase) fitted from the live archive.
+let MARKET_MED: number[][] | null = null;
+function marketMedian(letter: number, bagLeft: number): number {
+  if (!MARKET_MED) {
+    try {
+      const m = JSON.parse(readFileSync(new URL("./market.json", import.meta.url), "utf8"));
+      MARKET_MED = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((c) =>
+        (m.letters[c] as ({ medTop: number } | null)[]).map((r) => (r ? r.medTop : 10)),
+      );
+    } catch {
+      MARKET_MED = Array.from({ length: 26 }, () => [10, 10, 10, 10, 10]);
+    }
+  }
+  const done = 67 - bagLeft;
+  const ph = Math.max(0, Math.min(4, Math.floor((done * 5) / 68)));
+  return MARKET_MED[letter][ph];
+}
+
 const DUP_CAP = "AEIONRSTL".split("").map((c) => c.charCodeAt(0) - 65);
 
 export interface Params {
@@ -53,6 +72,9 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  marketFloor: number; // bid at least this fraction of the market median on letters with positive value (0 = off)
+  marketFloorMinGain: number; // ...when the letter's marginal value is at least this
+  midMinReward: number; // mid-match, also cash shorter words worth at least this many points (0 = off)
   minBid: number; // bid at least this on any playable letter (tiles have no holding cost; reserve is 1)
   lateFillN: number; // in the last N auctions, don't let bids fall below lateFill if cash allows
   lateFill: number;
@@ -80,6 +102,9 @@ export const DEFAULT_PARAMS: Params = {
   minMidLen: 7,
   starveCash: 19,
   allIn: 1,
+  marketFloor: 1.0,
+  marketFloorMinGain: 2,
+  midMinReward: 0,
   minBid: 1,
   lateFillN: 16,
   lateFill: 12,
@@ -177,6 +202,10 @@ export class Brain {
     // Endgame fill: leftover cash is worthless, so any letter with positive
     // value is worth at least the going late price while we can afford it.
     if (v.bagLeft <= p.lateFillN && v.balance >= 2 * p.lateFill) amt = Math.max(amt, p.lateFill);
+    if (p.marketFloor > 0 && gain >= p.marketFloorMinGain) {
+      const floor = p.marketFloor * marketMedian(letter, v.bagLeft);
+      if (v.balance >= 2 * floor) amt = Math.max(amt, floor);
+    }
     amt = Math.max(amt, p.minBid);
     return Math.max(0, Math.min(cap, Math.round(amt)));
   }
@@ -189,7 +218,8 @@ export class Brain {
     // Mid-match, hold short words: the top live bots score ~85% of their
     // points from 7+ letter words. Cash shorter ones only when starved.
     const min = v.balance < this.p.starveCash ? 5 : this.p.minMidLen;
-    return ws.filter((k) => this.dict.len[k] >= min);
+    const r = this.p.midMinReward;
+    return ws.filter((k) => this.dict.len[k] >= min || (r > 0 && this.dict.rew[k] >= r));
   }
 }
 

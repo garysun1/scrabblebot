@@ -248,6 +248,8 @@ function tryBid(conn: DbConnection, matchId: bigint) {
   if (BRAIN === "v1") {
     const v = viewFor(conn, matchId);
     if (!v) return;
+    const st = stateFor(conn, matchId);
+    if (st) v.unseen = st.unseen;
     const amount = brain.bid(v, letter);
     submitBid(conn, matchId, a.id, a.letter, amount, `bal ${v.balance} bag ${v.bagLeft} rack ${rackToString(v.rack)} (${(performance.now() - t0).toFixed(0)}ms)`);
     return;

@@ -186,6 +186,54 @@ export class Dict {
     return { idx, miss };
   }
 
+  /**
+   * Long words (>= minLen) that contain `letter` and are within `maxMissing`
+   * tiles of rack `r` (which should already include the letter). For each
+   * such class: its index, how many tiles are missing, and which letters.
+   */
+  nearWords(r: Rack, letter: number, maxMissing = 2, minLen = 7): { idx: number[]; miss: number[]; missLetters: number[][] } {
+    const total = rackSize(r) + maxMissing;
+    const rm = rackMask(r);
+    const idx: number[] = [];
+    const miss: number[] = [];
+    const missLetters: number[][] = [];
+    const c = this.counts;
+    const bit = 1 << letter;
+    for (let k = 0; k < this.n; k++) {
+      const L = this.len[k];
+      if (L < minLen || L > total) continue;
+      if ((this.mask[k] & bit) === 0) continue;
+      let extra = this.mask[k] & ~rm;
+      // letters we lack entirely, counted: more than maxMissing distinct -> skip
+      let distinct = 0;
+      while (extra) {
+        extra &= extra - 1;
+        if (++distinct > maxMissing) break;
+      }
+      if (distinct > maxMissing) continue;
+      const o = k * 26;
+      let d = 0;
+      const ml: number[] = [];
+      let ok = true;
+      for (let i = 0; i < 26; i++) {
+        const need = c[o + i] - r[i];
+        if (need > 0) {
+          d += need;
+          if (d > maxMissing) {
+            ok = false;
+            break;
+          }
+          for (let t = 0; t < need; t++) ml.push(i);
+        }
+      }
+      if (!ok) continue;
+      idx.push(k);
+      miss.push(d);
+      missLetters.push(ml);
+    }
+    return { idx, miss, missLetters };
+  }
+
   /** Narrow an existing candidate list to those fitting `r`. */
   filter(cands: number[], r: Rack, minLen = 2): number[] {
     const out: number[] = [];

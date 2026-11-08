@@ -72,6 +72,9 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  nearW: number; // weight of the near-complete-long-word value for premium letters (0 = off)
+  nearQ: number; // chance we end up with one specific missing tile
+  nearMinFace: number; // apply to letters with face >= this
   premiumMult: number; // bid multiplier on 5+ point letters (K J X Q Z) while bagLeft > premiumUntil
   premiumUntil: number;
   marketFloor: number; // bid at least this fraction of the market median on letters with positive value (0 = off)
@@ -104,6 +107,9 @@ export const DEFAULT_PARAMS: Params = {
   minMidLen: 99, // hold everything (a 7 can grow into an 8); cash only when starved or at the flush
   starveCash: 20,
   allIn: 1,
+  nearW: 0,
+  nearQ: 0.3,
+  nearMinFace: 5,
   premiumMult: 1,
   premiumUntil: 15,
   marketFloor: 1.0,
@@ -123,6 +129,8 @@ export interface View {
   firstPrice: boolean;
   /** highest balance among opponents, if known (bids above it +1 buy nothing under Vickrey) */
   maxRivalBalance?: number;
+  /** tiles not yet seen (bag + rivals' hidden tiles); enables the near-word valuation */
+  unseen?: Rack;
 }
 
 export class Brain {
@@ -175,6 +183,40 @@ export class Brain {
     return this.plan(r, bagLeft, cands).score;
   }
 
+  /**
+   * Expected extra points from long words containing `letter` that are
+   * within two tiles of `rack`: for each such word, reward x the chance we
+   * get the missing tiles (nearQ each, scaled by how many of that letter
+   * remain unseen). Words overlap, so take the best plus a small bonus for
+   * breadth.
+   */
+  nearValue(rack: Rack, letter: number, unseen: Rack, bagLeft: number): number {
+    const { idx, miss, missLetters } = this.dict.nearWords(rack, letter, 2, 7);
+    if (idx.length === 0) return 0;
+    const draws = Math.min(bagLeft, 30);
+    let best = 0;
+    let breadth = 0;
+    for (let j = 0; j < idx.length; j++) {
+      const k = idx[j];
+      const already = this.dict.fits(k, rack);
+      let pr = 1;
+      if (!already) {
+        for (const l of missLetters[j]) {
+          const u = Math.max(0, unseen[l]);
+          // chance this letter is drawn in the auctions left, times chance we win it
+          const avail = 1 - Math.pow(1 - u / 98, draws);
+          pr *= this.p.nearQ * avail;
+        }
+      } else {
+        continue; // already playable: counted by the partition value
+      }
+      const ev = this.dict.rew[k] * pr;
+      if (ev > best) best = ev;
+      breadth += pr;
+    }
+    return best * (1 + 0.15 * Math.log1p(breadth));
+  }
+
   /** Coins to bid for `letter` (0..25). */
   bid(v: View, letter: number): number {
     // The last auction's letter can never be played.
@@ -186,7 +228,12 @@ export class Brain {
     withL[letter]++;
     const candsWith = this.dict.candidates(withL);
     const candsWithout = this.dict.filter(candsWith, v.rack);
-    const gain = this.value(withL, after, candsWith) - this.value(v.rack, after, candsWithout);
+    let gain = this.value(withL, after, candsWith) - this.value(v.rack, after, candsWithout);
+    // Premium letters: the leaders buy a Z when a 7-letter Z-word is within
+    // reach of their rack and the unseen tiles. Value that explicitly.
+    if (p.nearW > 0 && FACE[letter] >= p.nearMinFace && v.unseen && v.bagLeft > 3) {
+      gain += p.nearW * this.nearValue(withL, letter, v.unseen, v.bagLeft);
+    }
     const cap = Math.min(v.balance, (v.maxRivalBalance ?? Infinity) + 1);
     if (gain <= 0) return Math.min(cap, p.minBid);
     // Last usable auction: cash is worthless one auction from now and the tile

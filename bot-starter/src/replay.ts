@@ -84,7 +84,7 @@ export function v1Policy(d: Dict, p: Params): Policy & { letter: number } {
     reset() {},
     bid(s: State) {
       return brain.bid(
-        { rack: s.rack, balance: s.balance, bagLeft: s.bagLeft, firstPrice: s.firstPrice, maxRivalBalance: s.maxRivalBalance },
+        { rack: s.rack, balance: s.balance, bagLeft: s.bagLeft, firstPrice: s.firstPrice, maxRivalBalance: s.maxRivalBalance, unseen: s.unseen },
         pol.letter,
       );
     },

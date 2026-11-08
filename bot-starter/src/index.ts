@@ -562,8 +562,16 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         watchMatch(conn, id);
       }
     }
-    // Heartbeat: re-evaluate the open auction in case an event was missed.
-    refresh(conn);
+    // Heartbeat: only if the open auction has no bid from us yet (a missed
+    // event), so the per-second check costs nothing in the normal case.
+    for (const id of running) {
+      const m = conn.db.matchState.id.find(id);
+      const aid = m?.currentAuctionId;
+      if (aid != null && !lastBid.has(String(aid))) {
+        refresh(conn);
+        break;
+      }
+    }
   }, 1000);
 
   // Safety net: if we're idle (a join failed, a match end was missed), rejoin.

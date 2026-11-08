@@ -252,7 +252,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   );
   // REPLAY_SPLIT=train|test: even/odd matches of the pool, for tuning without memorizing.
   const split = process.env.REPLAY_SPLIT;
-  const pool = split ? all.filter((_, i) => (i % 2 === 0) === (split === "train")) : all;
+  let pool = split ? all.filter((_, i) => (i % 2 === 0) === (split === "train")) : all;
+  // REPLAY_TABLE=weak|strong with REPLAY_STATS=<bot_stats jsonl: [bot_id, mu, ...]>:
+  // keep only tables whose mean rival rating is below/above the pool median.
+  if (process.env.REPLAY_TABLE && process.env.REPLAY_STATS) {
+    const mu = new Map<number, number>();
+    for (const line of readFileSync(process.env.REPLAY_STATS, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line);
+      mu.set(Number(r[0]), Number(r[1]));
+    }
+    const strength = (m: MatchRec) => m.scores.reduce((a, [b]) => a + (mu.get(b) ?? 25), 0) / m.scores.length;
+    const vals = pool.map(strength).sort((a, b) => a - b);
+    const med = vals[Math.floor(vals.length / 2)];
+    pool = pool.filter((m) => (process.env.REPLAY_TABLE === "weak" ? strength(m) < med : strength(m) >= med));
+    if (!process.env.QUIET) console.log(`table filter ${process.env.REPLAY_TABLE}: ${pool.length} matches (median rival mu ${med.toFixed(1)})`);
+  }
   if (!process.env.QUIET) console.log(`replay pool: ${pool.length} matches`);
   const rnd = mulberry(seed);
   // deterministic subset

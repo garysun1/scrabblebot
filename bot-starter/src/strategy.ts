@@ -72,6 +72,17 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  // Leader-derived rules (archive analysis 2026-11-08), all off by default:
+  premiumNearFloor: number; // FACE>=5 & a 7 containing L within ONE tile & vowel share>=0.4: floor = this x market median (0 = off)
+  premiumBaseFloor: number; // FACE>=5 otherwise: floor = this x market median (0 = off)
+  premiumNearUntil: number; // the two rules above apply while bagLeft > this
+  lateCashN: number; // last N auctions: bid at least lateCashFrac x balance on any useful letter (0 = off)
+  lateCashFrac: number;
+  poorAllIn: number; // balance <= this: bid the whole balance on any useful letter (0 = off)
+  floorAllAfter: number; // once bagLeft < this, the market floor applies to any positive gain (0 = off)
+  earlyShade: number; // 1 = first 14 auctions: 1pt consonants x0.87, vowels x0.93, premium x1.05
+  hoardRackCap: number; // hoard value scaled by min(1, cap / tiles) so big racks aren't rewarded (0 = off)
+  playTopOnly: number; // 1 = mid-match, play only the single highest-reward long word, keep the rest as stems
   nearW: number; // weight of the near-complete-long-word value for premium letters (0 = off)
   nearQ: number; // chance we end up with one specific missing tile
   nearMinFace: number; // apply to letters with face >= this
@@ -107,6 +118,16 @@ export const DEFAULT_PARAMS: Params = {
   minMidLen: 99, // hold everything (a 7 can grow into an 8); cash only when starved or at the flush
   starveCash: 20,
   allIn: 1,
+  premiumNearFloor: 0,
+  premiumBaseFloor: 0,
+  premiumNearUntil: 20,
+  lateCashN: 0,
+  lateCashFrac: 0.9,
+  poorAllIn: 0,
+  floorAllAfter: 0,
+  earlyShade: 0,
+  hoardRackCap: 0,
+  playTopOnly: 0,
   nearW: 0,
   nearQ: 0.3,
   nearMinFace: 5,
@@ -168,6 +189,7 @@ export class Brain {
     }
     // Q without U is nearly dead weight.
     if (r[16] > 0 && r[20] === 0) v -= FACE[16] * p.alpha * 0.6;
+    if (p.hoardRackCap > 0 && n > p.hoardRackCap) v *= p.hoardRackCap / n;
     return v;
   }
 
@@ -249,15 +271,40 @@ export class Brain {
     const ramp = p.earlyMult + (p.lateMult - p.earlyMult) * progress;
     let amt = gain * p.kappa * cash * ramp;
     if (FACE[letter] >= 5 && v.bagLeft > p.premiumUntil && !(letter === 16 && v.rack[20] === 0)) amt *= p.premiumMult;
+    if (p.earlyShade > 0 && v.bagLeft > 53) {
+      amt *= VOWEL[letter] ? 0.93 : FACE[letter] === 1 ? 0.87 : FACE[letter] >= 5 ? 1.05 : 1;
+    }
     if (v.firstPrice) amt *= 0.6; // shade: we pay what we bid
     amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
     // Endgame fill: leftover cash is worthless, so any letter with positive
     // value is worth at least the going late price while we can afford it.
     if (v.bagLeft <= p.lateFillN && v.balance >= 2 * p.lateFill) amt = Math.max(amt, p.lateFill);
-    if (p.marketFloor > 0 && gain >= p.marketFloorMinGain) {
+    const minGain = p.floorAllAfter > 0 && v.bagLeft < p.floorAllAfter ? 0 : p.marketFloorMinGain;
+    if (p.marketFloor > 0 && gain >= minGain) {
       const floor = p.marketFloor * marketMedian(letter, v.bagLeft);
       if (v.balance >= 2 * floor) amt = Math.max(amt, floor);
     }
+    // Premium letters (K J X Q Z): the leaders take them at ~1.15x median when a
+    // 7 containing the letter is within one tile of a vowel-balanced rack, and
+    // at about the median otherwise.
+    if ((p.premiumNearFloor > 0 || p.premiumBaseFloor > 0) && FACE[letter] >= 5 && v.bagLeft > p.premiumNearUntil && !(letter === 16 && v.rack[20] === 0)) {
+      let n = 0;
+      let vow = 0;
+      for (let i = 0; i < 26; i++) {
+        n += withL[i];
+        if (VOWEL[i]) vow += withL[i];
+      }
+      const near1 = p.premiumNearFloor > 0 && vow >= 0.4 * n && this.dict.nearWords(withL, letter, 1, 7).idx.length > 0;
+      const mult = near1 ? p.premiumNearFloor : p.premiumBaseFloor;
+      if (mult > 0) {
+        const floor = mult * marketMedian(letter, v.bagLeft);
+        if (v.balance >= floor) amt = Math.max(amt, floor);
+      }
+    }
+    // Cash rules: the leaders bid ~90% of their balance through the last fifth
+    // and all of it once they are nearly broke.
+    if (p.lateCashN > 0 && v.bagLeft <= p.lateCashN) amt = Math.max(amt, p.lateCashFrac * v.balance);
+    if (p.poorAllIn > 0 && v.balance <= p.poorAllIn) amt = Math.max(amt, v.balance);
     amt = Math.max(amt, p.minBid);
     return Math.max(0, Math.min(cap, Math.round(amt)));
   }
@@ -271,7 +318,13 @@ export class Brain {
     // points from 7+ letter words. Cash shorter ones only when starved.
     const min = v.balance < this.p.starveCash ? 5 : this.p.minMidLen;
     const r = this.p.midMinReward;
-    return ws.filter((k) => this.dict.len[k] >= min || (r > 0 && this.dict.rew[k] >= r));
+    const picked = ws.filter((k) => this.dict.len[k] >= min || (r > 0 && this.dict.rew[k] >= r));
+    if (this.p.playTopOnly > 0 && picked.length > 1) {
+      let best = picked[0];
+      for (const k of picked) if (this.dict.rew[k] > this.dict.rew[best]) best = k;
+      return [best];
+    }
+    return picked;
   }
 }
 

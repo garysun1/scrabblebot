@@ -111,6 +111,12 @@ export interface State {
   heat: number; // price multiplier, 1 = as fitted
   /** seated opponents with their public balances; enables the per-opponent model */
   rivals?: { id: number; balance: number }[];
+  /** our score so far */
+  score?: number;
+  /** rivals' running scores (public), keyed by bot id */
+  rivalScores?: Record<number, number>;
+  /** 0-based index of the current auction in this match */
+  auctionIndex?: number;
 }
 
 // ---------- normal helpers ----------

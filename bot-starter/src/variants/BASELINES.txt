@@ -1,0 +1,5 @@
+# Baselines (current defaults = live bot), computed 02:31 UTC
+test split seed 11, REPLAY_SEEDS=4: v1 {} n=232: avg place 2.09 score 89.9 win 0.40 letters 12.8 endbal 21 places[1..7]=93,77,28,22,6,6,0 (128ms/match)
+test split seed 23, REPLAY_SEEDS=4: v1 {} n=232: avg place 2.08 score 90.0 win 0.44 letters 12.9 endbal 22 places[1..7]=103,58,37,23,5,6,0 (138ms/match)
+strong pool (replay_data.json, REPLAY_MIN_ID=42600 REPLAY_REAL=1), 97 matches x4 seeds: v1 {} n=388: avg place 2.07 score 99.8 win 0.40 letters 14.7 endbal 19 places[1..7]=157,121,53,39,18,0,0 (136ms/match)
+example variant (must equal the seed-11 line): policy:./variants/example/policy.ts {} n=232: avg place 2.09 score 89.9 win 0.40 letters 12.8 endbal 21 places[1..7]=93,77,28,22,6,6,0 (130ms/match)

@@ -12,7 +12,7 @@
 //   npx tsx src/replay.ts v1 ...
 
 import { readFileSync } from "node:fs";
-import { BAG_COUNTS, Dict, type Rack, emptyRack } from "./engine.js";
+import { BAG_COUNTS, Dict, FACE, type Rack, emptyRack, reward } from "./engine.js";
 import { Brain2, DEFAULT_PARAMS2, type Params2, type State, unseenPool } from "./brain2.js";
 import { Brain, DEFAULT_PARAMS, type Params } from "./strategy.js";
 
@@ -142,6 +142,12 @@ export function replayMatch(d: Dict, m: MatchRec, pol: Policy & { letter: number
   let letters = 0;
   let pi = 0; // plays pointer
   const rivalBal = new Map<number, number>(m.scores.map(([b]) => [b, 100]));
+  const rivalScore = new Map<number, number>(m.scores.map(([b]) => [b, 0]));
+  const wordPts = (w: string) => {
+    let f = 0;
+    for (let j = 0; j < w.length; j++) f += FACE[w.charCodeAt(j) - 65] ?? 0;
+    return reward(f, w.length);
+  };
 
   const stateAt = (bagLeft: number): State => ({
     rack,
@@ -153,6 +159,9 @@ export function replayMatch(d: Dict, m: MatchRec, pol: Policy & { letter: number
     maxRivalBalance: Math.max(...rivalBal.values()),
     heat: 1,
     rivals: [...rivalBal].map(([id, balance]) => ({ id, balance })),
+    score,
+    rivalScores: Object.fromEntries(rivalScore),
+    auctionIndex: N - 1 - bagLeft,
   });
 
   const play = (bagLeft: number) => {
@@ -178,8 +187,10 @@ export function replayMatch(d: Dict, m: MatchRec, pol: Policy & { letter: number
     const bagLeft = N - 1 - i;
     // Rivals' plays up to this auction's close reveal hidden tiles.
     while (pi < m.plays.length && m.plays[pi][0] <= m.closes[i]) {
-      const [, , word] = m.plays[pi++];
+      const [, b, word] = m.plays[pi++];
       for (const c of word) rivalPlayed[c.charCodeAt(0) - 65]++;
+      rivalScore.set(b, (rivalScore.get(b) ?? 0) + wordPts(word));
+      rivalBal.set(b, (rivalBal.get(b) ?? 100) + wordPts(word));
     }
     play(bagLeft);
     const s = stateAt(bagLeft);
@@ -246,10 +257,20 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const rnd = mulberry(seed);
   // deterministic subset
   const idx = pool.map((_, i) => i).sort(() => rnd() - 0.5).slice(0, n);
-  const pol =
-    which === "v1"
-      ? v1Policy(d, { ...DEFAULT_PARAMS, ...over })
-      : v2Policy(d, { ...DEFAULT_PARAMS2, ...over }, rnd);
+  // REPLAY_POLICY=./variants/<slug>/policy.ts : a module exporting
+  //   makePolicy(d: Dict, over: Record<string, unknown>, rnd: () => number): Policy & { letter: number }
+  // (path relative to this src/ directory). `which` is then just a label.
+  let pol: Policy & { letter: number };
+  if (process.env.REPLAY_POLICY) {
+    const mod = await import(new URL(process.env.REPLAY_POLICY, import.meta.url).href);
+    pol = mod.makePolicy(d, over, rnd);
+  } else {
+    pol =
+      which === "v1"
+        ? v1Policy(d, { ...DEFAULT_PARAMS, ...over })
+        : v2Policy(d, { ...DEFAULT_PARAMS2, ...over }, rnd);
+  }
+  const label = process.env.REPLAY_POLICY ? `policy:${process.env.REPLAY_POLICY}` : which;
   let P = 0, S = 0, W = 0, B = 0, Lt = 0, N = 0;
   const t0 = Date.now();
   const hist = new Array(8).fill(0);
@@ -262,7 +283,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
   }
   console.log(
-    `${which} ${JSON.stringify(over)} n=${N}: avg place ${(P / N).toFixed(2)} score ${(S / N).toFixed(1)} ` +
+    `${label} ${JSON.stringify(over)} n=${N}: avg place ${(P / N).toFixed(2)} score ${(S / N).toFixed(1)} ` +
       `win ${(W / N).toFixed(2)} letters ${(Lt / N).toFixed(1)} endbal ${(B / N).toFixed(0)} places[1..7]=${hist.slice(1).join(",")} (${((Date.now() - t0) / N).toFixed(0)}ms/match)`,
   );
 }

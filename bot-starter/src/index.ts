@@ -38,6 +38,8 @@ const BOT_NAME = process.env.BOT_NAME ?? "bot";
 const BOT_TOKEN = process.env.BOT_TOKEN; // from the website, first run only
 const BOT_NONCE = process.env.BOT_NONCE; // from the CLI, first run only
 const TOURNAMENT_ID = process.env.TOURNAMENT_ID;
+// Register for any tournament that is open for signup, automatically (AUTO_TOURNAMENT=0 disables).
+const AUTO_TOURNAMENT = (process.env.AUTO_TOURNAMENT ?? "1") !== "0";
 const TOKEN_PATH = path.join(process.cwd(), `.token-${BOT_NAME}`);
 
 function loadToken(): string | undefined {
@@ -480,6 +482,8 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         "SELECT * FROM bot_credential",
         "SELECT * FROM bot",
         "SELECT * FROM my_rack",
+        "SELECT * FROM tournament",
+        "SELECT * FROM tournament_entry",
       ]);
   }
 
@@ -507,6 +511,11 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   });
   conn.db.botCredential.onInsert(() => {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
+  });
+  conn.db.tournament.onInsert(() => autoRegister(conn));
+  conn.db.tournament.onUpdate(() => autoRegister(conn));
+  conn.db.tournamentEntry.onInsert((_ctx, e) => {
+    if (myBotId !== null && e.botId === myBotId) console.log(`[${BOT_NAME}] entry confirmed in tournament ${e.tournamentId}`);
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
     if (myBotId === null || !myMatches.has(r.matchId)) return;
@@ -585,9 +594,11 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     }
   }, 1000);
 
-  // Safety net: if we're idle (a join failed, a match end was missed), rejoin.
+  // Safety net: if we're idle (a join failed, a match end was missed), rejoin;
+  // and re-check tournament registration.
   setInterval(() => {
     if (ready && myRunningMatches(conn).length === 0) joinLobby(conn, true);
+    if (ready) autoRegister(conn);
   }, 30_000);
 }
 
@@ -602,6 +613,30 @@ function joinLobby(conn: DbConnection, quiet = false) {
   conn.reducers.joinLobby({}).catch(quiet ? () => {} : logFailure("joining the lobby"));
 }
 
+// Tournament auto-registration: whenever a tournament is in its Registration
+// phase and we have no entry in it, sign up. Retried at most once a minute
+// per tournament, so a refusal (e.g. we're mid-match) can't spam the server.
+const regAttempt = new Map<string, number>();
+function autoRegister(conn: DbConnection) {
+  if (!AUTO_TOURNAMENT || myBotId === null) return;
+  for (const t of conn.db.tournament.iter()) {
+    if (t.status.tag !== "Registration") continue;
+    const entered = Array.from(conn.db.tournamentEntry.iter()).some(
+      (e) => e.tournamentId === t.id && e.botId === myBotId,
+    );
+    if (entered) continue;
+    const key = String(t.id);
+    const last = regAttempt.get(key) ?? 0;
+    if (Date.now() - last < 60_000) continue;
+    regAttempt.set(key, Date.now());
+    console.log(`[${BOT_NAME}] tournament ${t.id} is open for registration: registering`);
+    conn.reducers
+      .registerForTournament({ tournamentId: t.id })
+      .then(() => console.log(`[${BOT_NAME}] registered for tournament ${t.id}`))
+      .catch(logFailure(`registering for tournament ${t.id}`));
+  }
+}
+
 function bootstrapActivity(conn: DbConnection) {
   if (TOURNAMENT_ID) {
     conn.reducers
@@ -613,6 +648,7 @@ function bootstrapActivity(conn: DbConnection) {
   }
   joinLobby(conn);
   refresh(conn);
+  autoRegister(conn);
 }
 
 function main() {

@@ -366,6 +366,7 @@ function watchMatch(conn: DbConnection, matchId: bigint) {
     .onApplied(() => {
       const m = conn.db.matchState.id.find(matchId);
       console.log(`[${BOT_NAME}] watching match ${matchId} (${m?.status.tag ?? "?"})`);
+      lastAuctionSeen = Date.now();
       refresh(conn);
     })
     .onError((ctx: unknown) => goFallback(conn, errText(ctx)))
@@ -405,6 +406,7 @@ function dropStaleSubs(conn: DbConnection) {
 let ready = false;
 let lastAuctionSeen = Date.now();
 let lastBidAt = Date.now();
+let lastResub = 0;
 function onReady(conn: DbConnection) {
   // Resolve our bot id, possibly after claiming a nonce.
   myBotId = resolveMyBotId(conn);
@@ -492,6 +494,9 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       refresh(conn);
     }
   });
+  conn.db.auction.onUpdate((_ctx, _o, a) => {
+    if (myMatches.has(a.matchId)) lastAuctionSeen = Date.now();
+  });
   conn.db.myRack.onInsert(() => refresh(conn));
   conn.db.myRack.onUpdate(() => refresh(conn));
   conn.db.myRack.onDelete(() => refresh(conn));
@@ -503,6 +508,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
     if (myBotId === null || !myMatches.has(r.matchId)) return;
+    lastAuctionSeen = Date.now();
     // Price calibration: compare the clearing price with the market model.
     const paid = Number(r.paid);
     if (paid > 0) {
@@ -519,6 +525,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
 
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
     if (!myMatches.has(neu.id)) return;
+    lastAuctionSeen = Date.now();
     refresh(conn);
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
       const me = participantForMatch(conn, neu.id);
@@ -550,14 +557,16 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       return;
     }
     const now = Date.now();
-    if (now - lastAuctionSeen > 8000) {
-      console.error(`[${BOT_NAME}] no auction for 8s mid-match: feed stalled, exiting to reconnect`);
+    const silent = now - lastAuctionSeen;
+    const noBid = now - lastBidAt;
+    if (silent > 20000) {
+      console.error(`[${BOT_NAME}] no match activity for 20s: feed stalled, exiting to reconnect`);
       process.exit(2);
     }
-    if (now - lastBidAt > 6000) {
-      lastBidAt = now;
+    if ((silent > 6000 || noBid > 6000) && now - lastResub > 6000) {
+      lastResub = now;
       for (const id of running) {
-        console.warn(`[${BOT_NAME}] no bid for 6s in running match ${id}: resubscribing`);
+        console.warn(`[${BOT_NAME}] match ${id}: ${silent > 6000 ? "no activity" : "no bid"} for 6s, resubscribing`);
         matchSubs.delete(String(id));
         watchMatch(conn, id);
       }

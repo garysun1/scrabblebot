@@ -1,0 +1,2 @@
+replay pool: 59 matches
+policy:./variants/leader-imitation/policy.ts {"liQ":2} n=236: avg place 3.07 score 76.2 win 0.15 letters 12.3 endbal 18 places[1..7]=36,48,69,48,18,16,1 (3434ms/match)

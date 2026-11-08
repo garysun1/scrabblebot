@@ -1,0 +1,1 @@
+v1 {} n=118: avg place 1.99 score 91.5 win 0.43 letters 13.4 endbal 19 places[1..7]=51,35,20,8,2,2,0 (339ms/match)

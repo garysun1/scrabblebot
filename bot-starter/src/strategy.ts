@@ -82,6 +82,7 @@ export interface Params {
   floorAllAfter: number; // once bagLeft < this, the market floor applies to any positive gain (0 = off)
   earlyShade: number; // 1 = first 14 auctions: 1pt consonants x0.87, vowels x0.93, premium x1.05
   hoardRackCap: number; // hoard value scaled by min(1, cap / tiles) so big racks aren't rewarded (0 = off)
+  preFlushAt: number; // bagLeft <= this: also play 7+ letter words now (latency hedge before the final flush; 0 = off)
   playTopOnly: number; // 1 = mid-match, play only the single highest-reward long word, keep the rest as stems
   nearW: number; // weight of the near-complete-long-word value for premium letters (0 = off)
   nearQ: number; // chance we end up with one specific missing tile
@@ -127,6 +128,7 @@ export const DEFAULT_PARAMS: Params = {
   floorAllAfter: 0,
   earlyShade: 0,
   hoardRackCap: 0,
+  preFlushAt: 0,
   playTopOnly: 0,
   nearW: 0,
   nearQ: 0.3,
@@ -316,7 +318,8 @@ export class Brain {
     if (v.bagLeft <= this.p.flushAt) return ws;
     // Mid-match, hold short words: the top live bots score ~85% of their
     // points from 7+ letter words. Cash shorter ones only when starved.
-    const min = v.balance < this.p.starveCash ? 5 : this.p.minMidLen;
+    let min = v.balance < this.p.starveCash ? 5 : this.p.minMidLen;
+    if (this.p.preFlushAt > 0 && v.bagLeft <= this.p.preFlushAt) min = Math.min(min, 7);
     const r = this.p.midMinReward;
     const picked = ws.filter((k) => this.dict.len[k] >= min || (r > 0 && this.dict.rew[k] >= r));
     if (this.p.playTopOnly > 0 && picked.length > 1) {

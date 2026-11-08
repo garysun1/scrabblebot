@@ -1,0 +1,5 @@
+v1 equivalence (liQ:-1 vs Brain.bid): 416/416 identical
+7 tiles: bid 1ms wall / 2ms cpu; words 17ms wall / 1ms cpu
+14 tiles: bid 153ms wall / 33ms cpu; words 89ms wall / 19ms cpu
+20 tiles: bid 211ms wall / 43ms cpu; words 115ms wall / 23ms cpu
+28 tiles: bid 286ms wall / 60ms cpu; words 166ms wall / 33ms cpu

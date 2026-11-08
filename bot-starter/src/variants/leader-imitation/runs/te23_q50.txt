@@ -1,0 +1,5 @@
+replay pool: 58 matches
+policy:./variants/leader-imitation/policy.ts {"liQ":0} n=232: avg place 2.38 score 84.6 win 0.33 letters 12.9 endbal 19 places[1..7]=76,65,45,26,14,6,0 (4567ms/match)
+LI_STATS phase 0: vowel=0.406 cons1=0.223 cons2-4=0.321 prem5+=0.050 n=1388
+LI_STATS phase 1: vowel=0.370 cons1=0.308 cons2-4=0.304 prem5+=0.018 n=907
+LI_STATS phase 2: vowel=0.440 cons1=0.273 cons2-4=0.257 prem5+=0.030 n=693

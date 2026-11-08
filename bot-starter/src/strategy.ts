@@ -128,7 +128,7 @@ export const DEFAULT_PARAMS: Params = {
   floorAllAfter: 0,
   earlyShade: 0,
   hoardRackCap: 0,
-  preFlushAt: 0,
+  preFlushAt: 3,
   playTopOnly: 0,
   nearW: 0,
   nearQ: 0.3,

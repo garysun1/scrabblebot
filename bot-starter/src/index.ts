@@ -230,6 +230,7 @@ function submitBid(conn: DbConnection, matchId: bigint, auctionId: bigint, lette
   const prev = lastBid.get(key);
   if (prev === amount || (prev === undefined && amount <= 0)) return;
   lastBid.set(key, amount);
+  lastBidAt = Date.now();
   conn.reducers
     .submitBid({ auctionId, amount: BigInt(amount) })
     .catch(logFailure(`bid on auction ${auctionId}`));
@@ -378,21 +379,32 @@ function watchMatch(conn: DbConnection, matchId: bigint) {
   matchSubs.set(key, h);
 }
 
+// Ended matches' subscriptions are dropped only while we're idle. Dropping
+// one while the next match is already running coincided with the client
+// going silent for the rest of that match (two back-to-back starts, two
+// zero-score matches), so never unsubscribe mid-match.
+const staleSubs: { unsubscribe(): void }[] = [];
 function unwatchMatch(matchId: bigint) {
   const key = String(matchId);
   const h = matchSubs.get(key);
   matchSubs.delete(key);
-  if (h) setTimeout(() => {
+  if (h) staleSubs.push(h);
+}
+function dropStaleSubs(conn: DbConnection) {
+  if (myRunningMatches(conn).length > 0) return;
+  while (staleSubs.length > 0) {
+    const h = staleSubs.pop()!;
     try {
       h.unsubscribe();
     } catch {
       /* already gone */
     }
-  }, 2000);
+  }
 }
 
 let ready = false;
 let lastAuctionSeen = Date.now();
+let lastBidAt = Date.now();
 function onReady(conn: DbConnection) {
   // Resolve our bot id, possibly after claiming a nonce.
   myBotId = resolveMyBotId(conn);
@@ -525,18 +537,33 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     }
   });
 
-  // Watchdog: a silently stalled feed mid-match means losing every auction
-  // (K-13 once finished a tournament game on 0 this way). Exit so the
-  // restart loop (see BOT.md) reconnects us.
+  // Watchdog. A silently stalled feed mid-match means losing every auction
+  // (K-13 once finished a tournament game on 0 this way): exit so the
+  // restart loop reconnects us. If auctions do arrive but we haven't bid
+  // for a while, our view of the match is broken: resubscribe to it.
   setInterval(() => {
-    if (!ready || myRunningMatches(conn).length === 0) {
+    const running = myRunningMatches(conn);
+    if (!ready || running.length === 0) {
       lastAuctionSeen = Date.now();
+      lastBidAt = Date.now();
+      dropStaleSubs(conn);
       return;
     }
-    if (Date.now() - lastAuctionSeen > 8000) {
+    const now = Date.now();
+    if (now - lastAuctionSeen > 8000) {
       console.error(`[${BOT_NAME}] no auction for 8s mid-match: feed stalled, exiting to reconnect`);
       process.exit(2);
     }
+    if (now - lastBidAt > 6000) {
+      lastBidAt = now;
+      for (const id of running) {
+        console.warn(`[${BOT_NAME}] no bid for 6s in running match ${id}: resubscribing`);
+        matchSubs.delete(String(id));
+        watchMatch(conn, id);
+      }
+    }
+    // Heartbeat: re-evaluate the open auction in case an event was missed.
+    refresh(conn);
   }, 1000);
 
   // Safety net: if we're idle (a join failed, a match end was missed), rejoin.

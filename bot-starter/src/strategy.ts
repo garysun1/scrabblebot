@@ -72,6 +72,8 @@ export interface Params {
   minMidLen: number; // mid-match, only cash words at least this long...
   starveCash: number; // ...unless balance is below this (then 5+ letters)
   allIn: number; // go all-in on useful letters when bagLeft <= this
+  premiumMult: number; // bid multiplier on 5+ point letters (K J X Q Z) while bagLeft > premiumUntil
+  premiumUntil: number;
   marketFloor: number; // bid at least this fraction of the market median on letters with positive value (0 = off)
   marketFloorMinGain: number; // ...when the letter's marginal value is at least this
   midMinReward: number; // mid-match, also cash shorter words worth at least this many points (0 = off)
@@ -102,6 +104,8 @@ export const DEFAULT_PARAMS: Params = {
   minMidLen: 99, // hold everything (a 7 can grow into an 8); cash only when starved or at the flush
   starveCash: 20,
   allIn: 1,
+  premiumMult: 1,
+  premiumUntil: 15,
   marketFloor: 1.0,
   marketFloorMinGain: 2,
   midMinReward: 0,
@@ -197,6 +201,7 @@ export class Brain {
     const progress = Math.max(0, Math.min(1, 1 - v.bagLeft / 63));
     const ramp = p.earlyMult + (p.lateMult - p.earlyMult) * progress;
     let amt = gain * p.kappa * cash * ramp;
+    if (FACE[letter] >= 5 && v.bagLeft > p.premiumUntil && !(letter === 16 && v.rack[20] === 0)) amt *= p.premiumMult;
     if (v.firstPrice) amt *= 0.6; // shade: we pay what we bid
     amt = Math.min(amt, v.balance * p.maxFrac + (v.bagLeft < 6 ? v.balance : 0));
     // Endgame fill: leftover cash is worthless, so any letter with positive

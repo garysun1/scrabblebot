@@ -6,22 +6,23 @@ import { DEFAULT_PARAMS } from "./strategy.js";
 
 type P = Record<string, number>;
 const SPACE: Record<string, [number, number, number]> = {
-  // name: [initial mean, initial sd, min]
-  kappa: [3, 0.6, 1],
-  lateMult: [1.3, 0.25, 0.8],
-  horizon: [14, 4, 4],
-  alpha: [1.5, 0.5, 0.3],
-  base: [3, 1, 0],
-  vowelPen: [2.5, 0.8, 0],
-  dupPen: [1.5, 0.6, 0],
-  friend: [1, 0.5, 0],
-  faceFriend: [0.5, 0.25, 0],
-  spendPerAuction: [3, 1, 0.5],
-  cashMax: [3, 0.7, 1],
-  minMidLen: [7, 0.7, 5],
-  starveCash: [15, 6, 0],
-  lateFillN: [6, 5, 0],
-  lateFill: [10, 3, 4],
+  // name: [initial mean, initial sd, min] — centred on the current defaults
+  kappa: [2.4, 0.4, 1],
+  lateMult: [1.4, 0.2, 0.8],
+  horizon: [16, 3, 4],
+  alpha: [1.19, 0.3, 0.3],
+  base: [3.2, 0.7, 0],
+  vowelPen: [2.7, 0.6, 0],
+  dupPen: [1.7, 0.5, 0],
+  friend: [0.6, 0.3, 0],
+  faceFriend: [0.53, 0.2, 0],
+  spendPerAuction: [2.26, 0.6, 0.5],
+  cashMax: [2.45, 0.5, 1],
+  starveCash: [20, 5, 0],
+  lateFillN: [16, 4, 0],
+  lateFill: [12, 2, 4],
+  marketFloor: [1.0, 0.1, 0],
+  marketFloorMinGain: [2, 1, 0],
 };
 const INT = new Set(["horizon", "minMidLen", "lateFillN"]);
 const gens = Number(process.argv[2] ?? 6);

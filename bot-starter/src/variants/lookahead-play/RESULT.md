@@ -20,8 +20,8 @@ Also tested: auto-play of 8+ letter words; implemented but unevaluated: a starve
 
 ## 3. Evaluations
 Context: the box was at load average 70-110 on 4 cores (≈150-190 replay processes from all agents) for
-the whole window, so one 232-run eval needed 15-60 min wall. Three full REPLAY_SEEDS=4 runs finished (train
-seed 11 MC + v1, test seeds 11 and 23 MC); the strong pool did not. The quick runs are REPLAY_SEEDS=1 (58
+the whole window, so one 232-run eval needed 15-60 min wall. Four full REPLAY_SEEDS=4 runs finished (train
+seed 11 MC + v1, test seeds 11 and 23 MC, strong pool MC). The quick runs are REPLAY_SEEDS=1 (58
 matches per split/seed) done as PAIRED comparisons: the MC policy and the same wrapper with `mcOn:0`
 (= v1 words()) on the identical matches and identical starting racks, so the difference is far less noisy
 than the raw n suggests.

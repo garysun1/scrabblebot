@@ -99,8 +99,8 @@ export const DEFAULT_PARAMS: Params = {
   maxFrac: 1.0,
   budget: 3000,
   faceFriend: 0.53,
-  minMidLen: 7,
-  starveCash: 19,
+  minMidLen: 99, // hold everything (a 7 can grow into an 8); cash only when starved or at the flush
+  starveCash: 20,
   allIn: 1,
   marketFloor: 1.0,
   marketFloorMinGain: 2,

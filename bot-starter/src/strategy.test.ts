@@ -14,9 +14,13 @@ const rack = (letters: string) => {
 };
 const L = (c: string) => c.charCodeAt(0) - 65;
 
-test("plays a 7-letter word as soon as it has one", () => {
-  const words = brain.words({ rack: rack("RETAINSQ"), balance: 50, bagLeft: 40, firstPrice: false });
-  assert.ok(words.some((k) => dict.len[k] >= 7), words.map((k) => dict.word[k]).join(","));
+test("holds a 7-letter word mid-game, cashes it when starved, flushes it at the end", () => {
+  const rich = brain.words({ rack: rack("RETAINSQ"), balance: 50, bagLeft: 40, firstPrice: false });
+  assert.equal(rich.length, 0);
+  const broke = brain.words({ rack: rack("RETAINSQ"), balance: 5, bagLeft: 40, firstPrice: false });
+  assert.ok(broke.some((k) => dict.len[k] >= 7), broke.map((k) => dict.word[k]).join(","));
+  const end = brain.words({ rack: rack("RETAINSQ"), balance: 50, bagLeft: 1, firstPrice: false });
+  assert.ok(end.some((k) => dict.len[k] >= 7));
 });
 
 test("hoards short words mid-game but flushes them at the end", () => {
